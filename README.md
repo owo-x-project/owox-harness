@@ -60,3 +60,9 @@ bash .agents/scripts/restore_agent.sh [--snapshot <snapshot-id>] [--dry-run]
 3. 実装や修正に伴って正本も更新する
 4. 検証後に task を閉じ、次に読むべき資料を残す
 5. `validate_harness.sh` でハーネス全体の整合性を確認する
+
+## ライセンス
+
+このリポジトリ本体は `LICENSE` の条件で提供されます。
+
+一部の skill は第三者プロジェクトをもとにしています。第三者ライセンス表記は `NOTICE` を参照してください。

@@ -50,6 +50,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 RUN npm install -g opencode-ai
 RUN npm install -g @openai/codex
 
+# ---------- RTK ----------
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh \
+  | RTK_INSTALL_DIR=/usr/local/bin sh
+
 RUN mkdir -p \
   /home/vscode/.config/opencode \
   /home/vscode/.local/share/opencode \
