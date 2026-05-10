@@ -9,3 +9,4 @@
 - 個票を追加、更新、改名、移動、保管したら同カテゴリの `index.md` を同じ変更で更新する
 - proposal を追加または変更したら requirement / spec / ADR への昇格と ADR 更新要否を確認し、必要なら ADR を更新または作成する
 - research で重要判断が固まったら proposal または ADR への昇格を確認する
+- plan を追加または変更したら requirement / spec / ADR / validation / pattern / proposal / research への参照と昇格要否を確認する

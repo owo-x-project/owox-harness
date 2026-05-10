@@ -6,6 +6,7 @@
 - 1 判断 = 1 ADR 個票
 - 1 共通パターン = 1 patterns 個票
 - 1 外部サービス = 1 integrations 個票
+- 1 plan task = 1 plan task 個票
 - 複数の独立した対象を 1 個票に混在させない
 
 ## 対応する index.md
@@ -22,6 +23,7 @@
 - `docs/project/research/` 配下の個票を更新または作成したら `docs/project/research/index.md` を同じ変更で更新する
 - `docs/project/proposals/active/` または `docs/project/proposals/archive/` 配下の個票を更新または作成したら `docs/project/proposals/index.md` を同じ変更で更新する
 - `docs/project/adr/active/` または `docs/project/adr/archive/` 配下の個票を更新または作成したら `docs/project/adr/index.md` を同じ変更で更新する
+- `docs/project/plan/` 配下の plan、phase、task を更新または作成したら、同じ階層の `index.md` と上位の `index.md` を同じ変更で更新する
 
 ## index の参照の書き方
 
