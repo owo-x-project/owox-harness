@@ -11,6 +11,8 @@
   "shutdownAction": "stopCompose",
   "overrideCommand": false,
   "remoteEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "HOME": "/home/vscode",
     "PATH": "${containerEnv:PATH}:/home/vscode/.npm-global/bin:/home/vscode/.local/bin:/home/vscode/.local/share/pnpm"
   },
   "customizations": {

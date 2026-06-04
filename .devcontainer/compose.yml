@@ -13,6 +13,7 @@ services:
     environment:
       TZ: ${TZ:-Asia/Tokyo}
       COMPOSE_FILE: /workspace/.devcontainer/compose.yml
+      HOME: /home/vscode
       NPM_CONFIG_PREFIX: /home/vscode/.npm-global
       PNPM_HOME: /home/vscode/.local/share/pnpm
       PNPM_STORE_DIR: /pnpm/store
@@ -20,10 +21,13 @@ services:
       PIP_CACHE_DIR: /home/vscode/.cache/pip
       PIPX_HOME: /home/vscode/.local/pipx
       PIPX_BIN_DIR: /home/vscode/.local/bin
+      CLAUDE_CONFIG_DIR: /home/vscode/.claude
       PATH: /home/vscode/.npm-global/bin:/home/vscode/.local/bin:/home/vscode/.local/share/pnpm:${PATH}
     volumes:
       - ..:/workspace:cached
+      - vscode-home:/home/vscode
       - ${HOME}/.ssh:/home/vscode/.ssh:ro
+      - claude-home:/home/vscode/.claude
       - opencode-config:/home/vscode/.config/opencode
       - opencode-data:/home/vscode/.local/share/opencode
       - opencode-cache:/home/vscode/.cache/opencode
@@ -36,6 +40,8 @@ services:
       - host.docker.internal:host-gateway
 
 volumes:
+  vscode-home:
+  claude-home:
   codex-home:
   opencode-config:
   opencode-data:

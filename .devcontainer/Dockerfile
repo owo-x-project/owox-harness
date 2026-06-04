@@ -46,15 +46,18 @@ RUN mkdir -p /etc/apt/keyrings \
 # ---------- Python Dev Environment ----------
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
-# ---------- OpenCode ----------
-RUN npm install -g opencode-ai
-RUN npm install -g @openai/codex
+# ---------- AI coding agents ----------
+RUN npm install -g \
+  opencode-ai \
+  @openai/codex \
+  @anthropic-ai/claude-code
 
 # ---------- RTK ----------
 RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh \
   | RTK_INSTALL_DIR=/usr/local/bin sh
 
 RUN mkdir -p \
+  /home/vscode/.claude \
   /home/vscode/.config/opencode \
   /home/vscode/.local/share/opencode \
   /home/vscode/.cache/opencode \
@@ -75,6 +78,8 @@ ENV UV_CACHE_DIR=/home/vscode/.cache/uv
 ENV PIP_CACHE_DIR=/home/vscode/.cache/pip
 ENV PIPX_HOME=/home/vscode/.local/pipx
 ENV PIPX_BIN_DIR=/home/vscode/.local/bin
+ENV HOME=/home/vscode
+ENV CLAUDE_CONFIG_DIR=/home/vscode/.claude
 ENV PATH=/home/vscode/.npm-global/bin:/home/vscode/.local/bin:/home/vscode/.local/share/pnpm:/usr/local/bin:${PATH}
 
 WORKDIR /workspace
