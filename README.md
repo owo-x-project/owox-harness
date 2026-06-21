@@ -11,7 +11,7 @@ be generated into each supported AI tool.
 The goal is simple: AI and humans should always know what to do next, why it
 matters, and how to prove it is done.
 
-Japanese README: [README.ja.md](./[README.ja.md)
+Japanese README: [README.ja.md](./README.ja.md)
 
 ## Concept
 
