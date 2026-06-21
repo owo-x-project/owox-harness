@@ -1,0 +1,17 @@
+[package]
+name = "owox-core"
+version.workspace = true
+edition = "2024"
+publish = false
+
+[dependencies]
+# prose の正本 (brand/rules/context/glossary) は Markdown を自作パーサで読む (src/markdown.rs)。
+# machine 設定 (config.toml。targets 等) だけ TOML (`docs/decisions/20260612-正本フォーマット.md`)。
+serde = { version = "1", features = ["derive"] }
+# tool 共通返り値 (封筒) の data と記録層の構造化値に使う (`docs/decisions/20260613-Phase4-tool記録層.md`)。
+serde_json = "1"
+toml = "0.9"
+# 不可逆操作の検出 (既定パターン・target 追記とも「コマンド正規表現」)。
+# 標準ライブラリに正規表現が無く、target 機能の前提でもあるため加える
+# (`docs/decisions/20260612-Phase3-hook実装.md`)。
+regex = "1"

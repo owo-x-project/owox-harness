@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/mcp"]
+
+# 配布する版は workspace 共通 (`docs/decisions/20260621-Phase10-配布とrelease正本.md`)。
+# tag は owox-v<version>。owox --version がこの値を出す。
+[workspace.package]
+version = "0.1.0"
