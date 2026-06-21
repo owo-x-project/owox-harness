@@ -1,44 +1,105 @@
-# owox-harness product repo
+# owox-harness
 
-This product repo contains the devcontainer and the control repo used to
-develop the Rust `owox-harness` target harness.
+owox-harness turns AI-assisted development into a guided, verifiable workflow.
 
-Keep the root visually small:
+It gives AI agents the project rules, the next work to do, the checks that prove
+progress, and the points where a human must decide. Instead of asking every
+agent to guess the project context from a long prompt, owox-harness keeps the
+context, rules, requirements, decisions, and lessons in a project canon that can
+be generated into each supported AI tool.
 
-```text
-.devcontainer/
-control/
-target/                  # runtime only, ignored by git
-owox-harness.code-workspace
-README.md
-.gitignore
-```
+The goal is simple: AI and humans should always know what to do next, why it
+matters, and how to prove it is done.
 
-`control/` is the control repo. It uses Codex CLI only.
+Japanese README: `README.ja.md`
 
-`target/` is a runtime checkout or sandbox for the target repo. Its contents are
-ignored by this product repo.
+## Concept
 
-`.owox/` is target harness product data. It must not exist in `control/`.
+owox-harness is for teams that want AI agents to do real work without turning
+the project into a pile of chat history, stale prompts, and unclear decisions.
 
-The target repo must not contain control harness context.
+It is built around five outcomes:
 
-## Local Setup
+- **The next step is always visible.** owox-harness can show open decisions,
+  ready tasks, required context, and checks, so neither the human nor the agent
+  has to rediscover the workflow each session.
+- **Progress can be declared and verified.** Requirements, tasks, decisions, and
+  checks are connected. Work is not just "done because the agent said so"; it
+  can point to the condition that proves it.
+- **Agents work with minimal context.** The agent receives the project facts it
+  needs for the current task, not every document in the repository. Less noise
+  means fewer missed rules and fewer invented assumptions.
+- **The harness grows with the project.** As the project changes, owox-harness
+  can record new rules, lessons, risks, skills, and checks, then use them in
+  later sessions.
+- **Experience can outlive one project.** Useful skills and lessons can be kept
+  as reusable experience, not trapped inside one repository or one AI tool.
 
-Clone or copy the target repo into `target/`:
+The core idea is not "AI does everything." The core idea is "people decide,
+AI executes, owox-harness keeps the work clear, and the project remembers."
+
+Supported targets today:
+
+- Codex CLI
+- Claude Code
+
+## Install
+
+Install the `owox` executable from GitHub Releases.
+
+Linux and macOS:
 
 ```sh
-git clone <owox-harness-url> target
+curl -fsSL https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/setup.sh | sh
 ```
 
-If `target/` already exists as an empty directory, cloning into it is fine. Its
-contents are ignored by this product repo.
+Windows PowerShell:
 
-Inside the devcontainer:
+```powershell
+irm https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/install.ps1 | iex
+```
+
+Then check the installed version:
 
 ```sh
-cd /workspace/product/control
-bash scripts/check-target-cleanliness.sh
+owox --version
 ```
 
-Start Codex CLI from `/workspace/product/control`.
+Default install locations:
+
+- Linux and macOS: `~/.local/bin`
+- Windows: `%LOCALAPPDATA%\owox\bin`
+
+Set `OWOX_BIN_DIR` to choose another location.
+Set `OWOX_VERSION` to install a fixed release, for example `owox-v0.1.0`.
+
+## Basic Use
+
+In a project that has an `.owox/` directory:
+
+```sh
+owox setup
+```
+
+This reads the project canon from `.owox/`, generates the agent setup files, and
+checks that the result can be used.
+
+For a project in another directory:
+
+```sh
+owox setup path/to/project
+```
+
+## Repository Layout
+
+This product repository contains:
+
+- `control/`: owox-harness source, docs, and tests
+- `target/`: local sandbox for verification
+- `.github/workflows/`: release workflow
+
+The main owox-harness docs live under `control/docs/`.
+
+## License
+
+MIT License. See `LICENSE`.
