@@ -1,0 +1,6 @@
+[targets.codex]
+out = "."
+
+[targets.codex.models]
+default = "claude-opus-4-8"
+fast = "claude-haiku-4-5"
