@@ -1,0 +1,89 @@
+# owox-harness 配布 (`control/docs/decisions/20260621-Phase10-配布とrelease正本.md`)。
+# tag owox-v* の push で 4 種を native runner でビルドし、SHA256SUMS を添えて Release を切る。
+name: release
+
+on:
+  push:
+    tags:
+      - "owox-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: control
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: build
+        run: cargo build --release --bin owox --target ${{ matrix.target }}
+
+      - name: package (unix)
+        if: matrix.archive == 'tar'
+        run: |
+          tar -czf "owox-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" owox
+
+      - name: package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release/owox.exe" `
+            -DestinationPath "owox-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owox-${{ matrix.target }}
+          path: control/owox-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum owox-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/owox-* dist/SHA256SUMS \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

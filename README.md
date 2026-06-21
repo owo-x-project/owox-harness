@@ -1,68 +1,44 @@
-# AI エージェントハーネス テンプレート
+# owox-harness product repo
 
-このリポジトリは、人間が技術判断を担い、AI がその判断を速く正確に実行するための汎用ハーネステンプレートです。
+This product repo contains the devcontainer and the control repo used to
+develop the Rust `owox-harness` target harness.
 
-単一プロジェクトとモノレポのどちらにも導入できるように、ハーネス本体とプロジェクト正本を分離し、後からプロジェクト固有情報を初期化できる構造にしています。
+Keep the root visually small:
 
-## 目的
-
-- 人間が判断し、AI はその判断に沿って実行する
-- 要件、仕様、判断理由、検証方針を分離して管理する
-- AI が参照すべき資料の入口を短く保つ
-- 変更理由と影響範囲を後から追える状態を作る
-
-## ディレクトリの考え方
-
-### `.agents/`
-
-AI 専用領域です。プロジェクト定義、task 文脈キャッシュ、skill、補助スクリプトを置きます。
-
-### `docs/project/`
-
-人間向けのプロジェクト正本です。要求、仕様、判断、用語、検証、外部連携、チーム資料を置きます。
-
-クローン直後のこのテンプレートでは、`docs/project/` は空に近いひな型だけを持ちます。プロジェクト固有の内容は `harness-init` 実行後に追加してください。
-
-## 使い始め方
-
-1. テンプレートを対象リポジトリに配置する
-2. 必要なら `.agents/scripts/sync_agent.sh` で利用するエージェント向け設定を同期する
-3. `harness-init` skill を使って `.agents/project.md` と必要な正本を初期化する
-4. 以後は `task-*` と `docs-update-*` を使って作業を進める
-
-## エージェント設定の同期
-
-```bash
-bash .agents/scripts/sync_agent.sh <target> [--dry-run] [--force] [--snapshot-name <name>]
+```text
+.devcontainer/
+control/
+target/                  # runtime only, ignored by git
+owox-harness.code-workspace
+README.md
+.gitignore
 ```
 
-対応 target:
+`control/` is the control repo. It uses Codex CLI only.
 
-- `claude`
-- `copilot`
-- `cursor`
-- `opencode`
-- `crush`
-- `gemini`
-- `aider`
-- `kiro`
+`target/` is a runtime checkout or sandbox for the target repo. Its contents are
+ignored by this product repo.
 
-同期前の状態へ戻すには次を使います。
+`.owox/` is target harness product data. It must not exist in `control/`.
 
-```bash
-bash .agents/scripts/restore_agent.sh [--snapshot <snapshot-id>] [--dry-run]
+The target repo must not contain control harness context.
+
+## Local Setup
+
+Clone or copy the target repo into `target/`:
+
+```sh
+git clone <owox-harness-url> target
 ```
 
-## 典型的な流れ
+If `target/` already exists as an empty directory, cloning into it is fine. Its
+contents are ignored by this product repo.
 
-1. 人間が要求や制約を正本として定義する
-2. AI は `AGENTS.md` と `.agents/project.md` を入口に必要な資料だけ読む
-3. 実装や修正に伴って正本も更新する
-4. 検証後に task を閉じ、次に読むべき資料を残す
-5. `validate_harness.sh` でハーネス全体の整合性を確認する
+Inside the devcontainer:
 
-## ライセンス
+```sh
+cd /workspace/product/control
+bash scripts/check-target-cleanliness.sh
+```
 
-このリポジトリ本体は `LICENSE` の条件で提供されます。
-
-一部の skill は第三者プロジェクトをもとにしています。第三者ライセンス表記は `NOTICE` を参照してください。
+Start Codex CLI from `/workspace/product/control`.
