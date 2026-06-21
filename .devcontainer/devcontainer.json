@@ -1,27 +1,32 @@
 {
-  "name": "owox-harness-dev",
+  "name": "owox-harness-control",
   "dockerComposeFile": "compose.yml",
-  "service": "dev",
-  "runServices": [
-    "dev"
-  ],
-  "workspaceFolder": "/workspace",
+  "service": "control",
   "remoteUser": "root",
-  "updateRemoteUserUID": true,
-  "shutdownAction": "stopCompose",
-  "overrideCommand": false,
-  "remoteEnv": {
-    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
-    "HOME": "/home/vscode",
-    "PATH": "${containerEnv:PATH}:/home/vscode/.npm-global/bin:/home/vscode/.local/bin:/home/vscode/.local/share/pnpm"
+  "runServices": [
+    "control",
+    "headroom"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/node:2.0.0": {
+      "version": "lts",
+      "nvmVersion": "0.40"
+    }
   },
+  "workspaceFolder": "/workspace/product",
+  "postCreateCommand": "bash /workspace/product/.devcontainer/scripts/post-create.sh",
   "customizations": {
     "vscode": {
-      "extensions": [],
       "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash",
-        "files.eol": "\n"
-      }
+        "terminal.integrated.cwd": "/workspace/product/control",
+        "rust-analyzer.linkedProjects": [
+          "/workspace/product/target/Cargo.toml"
+        ]
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb"
+      ]
     }
   }
 }

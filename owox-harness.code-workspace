@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "name": "product",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "terminal.integrated.cwd": "${workspaceFolder:product}/control",
+    "rust-analyzer.linkedProjects": [
+      "target/Cargo.toml"
+    ]
+  }
+}

@@ -1,52 +1,39 @@
 services:
-  dev:
+  control:
     build:
-      context: ..
-      dockerfile: .devcontainer/Dockerfile
-      args:
-        NODE_MAJOR: ${NODE_MAJOR:-22}
-    image: ${COMPOSE_PROJECT_NAME:-monorepo}-opencode-devcontainer:local
-    working_dir: /workspace
-    init: true
+      context: .
+      dockerfile: Dockerfile
     command: sleep infinity
-    network_mode: host
+    depends_on:
+      headroom:
+        condition: service_started
     environment:
-      TZ: ${TZ:-Asia/Tokyo}
-      COMPOSE_FILE: /workspace/.devcontainer/compose.yml
-      HOME: /home/vscode
-      NPM_CONFIG_PREFIX: /home/vscode/.npm-global
-      PNPM_HOME: /home/vscode/.local/share/pnpm
-      PNPM_STORE_DIR: /pnpm/store
-      UV_CACHE_DIR: /home/vscode/.cache/uv
-      PIP_CACHE_DIR: /home/vscode/.cache/pip
-      PIPX_HOME: /home/vscode/.local/pipx
-      PIPX_BIN_DIR: /home/vscode/.local/bin
-      CLAUDE_CONFIG_DIR: /home/vscode/.claude
-      PATH: /home/vscode/.npm-global/bin:/home/vscode/.local/bin:/home/vscode/.local/share/pnpm:${PATH}
+      HEADROOM_BASE_URL: http://headroom:8787
+      HEADROOM_TELEMETRY: "off"
+      OPENAI_BASE_URL: http://headroom:8787/v1
+      PATH: /usr/local/rtk-shims:/usr/local/share/nvm/current/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      OWOX_RTK_SHIM: "1"
+      RTK_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ..:/workspace/product:cached
+      - ${HOME}/.gitconfig:/root/.gitconfig:ro,cached
+
+  headroom:
+    image: ghcr.io/chopratejas/headroom:latest
+    entrypoint: ["headroom", "proxy"]
+    command: ["--host", "0.0.0.0", "--port", "8787"]
+    environment:
+      HEADROOM_CONFIG_DIR: /tmp/headroom-home/.headroom/config
+      HEADROOM_HOST: 0.0.0.0
+      HEADROOM_TELEMETRY: "off"
+      HEADROOM_WORKSPACE_DIR: /tmp/headroom-home/.headroom
+      HOME: /tmp/headroom-home
+    expose:
+      - "8787"
+    restart: unless-stopped
     volumes:
       - ..:/workspace:cached
-      - vscode-home:/home/vscode
-      - ${HOME}/.ssh:/home/vscode/.ssh:ro
-      - claude-home:/home/vscode/.claude
-      - opencode-config:/home/vscode/.config/opencode
-      - opencode-data:/home/vscode/.local/share/opencode
-      - opencode-cache:/home/vscode/.cache/opencode
-      - codex-home:/home/vscode/.codex
-      - npm-global:/home/vscode/.npm-global
-      - user-local:/home/vscode/.local
-      - user-cache:/home/vscode/.cache
-      - pnpm-store:/pnpm/store
-    extra_hosts:
-      - host.docker.internal:host-gateway
+      - headroom-home:/tmp/headroom-home/.headroom
 
 volumes:
-  vscode-home:
-  claude-home:
-  codex-home:
-  opencode-config:
-  opencode-data:
-  opencode-cache:
-  npm-global:
-  user-local:
-  user-cache:
-  pnpm-store:
+  headroom-home:

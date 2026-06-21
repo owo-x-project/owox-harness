@@ -1,85 +1,50 @@
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
 
-ARG NODE_MAJOR=24
-ENV DEBIAN_FRONTEND=noninteractive
+ARG RTK_VERSION=v0.42.3
 
-# ---------- System packages ----------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  ca-certificates \
-  curl \
-  git \
-  git-lfs \
-  gh \
-  jq \
-  less \
-  unzip \
-  zip \
-  sudo \
-  openssh-client \
-  bash-completion \
-  build-essential \
-  pkg-config \
-  make \
-  procps \
-  ripgrep \
-  fd-find \
-  tree \
-  bubblewrap \
-  python3 \
-  python3-venv \
-  python3-pip \
-  pipx \
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    openssh-client \
+    pkg-config \
+    ripgrep \
+    shellcheck \
   && rm -rf /var/lib/apt/lists/*
 
-# ---------- JavaScript/TypeScript Dev Environment ----------
-RUN mkdir -p /etc/apt/keyrings \
-  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-  | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-  && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-  > /etc/apt/sources.list.d/nodesource.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends nodejs \
-  && rm -rf /var/lib/apt/lists/* \
-  && corepack enable \
-  && corepack prepare pnpm@latest --activate
+RUN rustup component add rustfmt clippy
+RUN cargo install --git https://github.com/rtk-ai/rtk --tag "${RTK_VERSION}" --locked
 
-# ---------- Python Dev Environment ----------
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+RUN install -d /usr/local/rtk-shims \
+  && printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    '' \
+    'command_name="$(basename "$0")"' \
+    'real_path="${PATH//\/usr\/local\/rtk-shims:/}"' \
+    'real_path="${real_path//:\/usr\/local\/rtk-shims/}"' \
+    'real_path="${real_path//\/usr\/local\/rtk-shims/}"' \
+    '' \
+    'if [[ "${OWOX_RTK_SHIM:-1}" == "0" || "${RTK_SHIM_ACTIVE:-}" == "1" ]]; then' \
+    '  PATH="$real_path" exec "$command_name" "$@"' \
+    'fi' \
+    '' \
+    'export RTK_SHIM_ACTIVE=1' \
+    'exec /usr/local/cargo/bin/rtk "$command_name" "$@"' \
+    >/usr/local/rtk-shims/.rtk-shim \
+  && chmod +x /usr/local/rtk-shims/.rtk-shim \
+  && for command_name in git gh cargo rustc rg docker docker-compose kubectl npm npx pnpm yarn bun pytest go make; do \
+    ln -s .rtk-shim "/usr/local/rtk-shims/${command_name}"; \
+  done \
+  && printf '%s\n' 'export PATH="/usr/local/rtk-shims:${PATH}"' >/etc/profile.d/zz-rtk-shims.sh
 
-# ---------- AI coding agents ----------
-RUN npm install -g \
-  opencode-ai \
-  @openai/codex \
-  @anthropic-ai/claude-code
+ENV HEADROOM_BASE_URL=http://headroom:8787 \
+  HEADROOM_TELEMETRY=off \
+  OPENAI_BASE_URL=http://headroom:8787/v1 \
+  OWOX_RTK_SHIM=1 \
+  RTK_TELEMETRY_DISABLED=1
 
-# ---------- RTK ----------
-RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh \
-  | RTK_INSTALL_DIR=/usr/local/bin sh
-
-RUN mkdir -p \
-  /home/vscode/.claude \
-  /home/vscode/.config/opencode \
-  /home/vscode/.local/share/opencode \
-  /home/vscode/.cache/opencode \
-  /home/vscode/.npm-global \
-  /home/vscode/.local/bin \
-  /home/vscode/.local/share/pnpm \
-  /home/vscode/.local/share/opencode \
-  /home/vscode/.cache/uv \
-  /home/vscode/.cache/pip \
-  /home/vscode/.cache/opencode \
-  /pnpm/store \
-  && chown -R vscode:vscode /home/vscode /pnpm
-
-ENV NPM_CONFIG_PREFIX=/home/vscode/.npm-global
-ENV PNPM_HOME=/home/vscode/.local/share/pnpm
-ENV PNPM_STORE_DIR=/pnpm/store
-ENV UV_CACHE_DIR=/home/vscode/.cache/uv
-ENV PIP_CACHE_DIR=/home/vscode/.cache/pip
-ENV PIPX_HOME=/home/vscode/.local/pipx
-ENV PIPX_BIN_DIR=/home/vscode/.local/bin
-ENV HOME=/home/vscode
-ENV CLAUDE_CONFIG_DIR=/home/vscode/.claude
-ENV PATH=/home/vscode/.npm-global/bin:/home/vscode/.local/bin:/home/vscode/.local/share/pnpm:/usr/local/bin:${PATH}
-
-WORKDIR /workspace
+WORKDIR /workspace/product/control

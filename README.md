@@ -1,68 +1,105 @@
-# AI エージェントハーネス テンプレート
+# owox-harness
 
-このリポジトリは、人間が技術判断を担い、AI がその判断を速く正確に実行するための汎用ハーネステンプレートです。
+owox-harness turns AI-assisted development into a guided, verifiable workflow.
 
-単一プロジェクトとモノレポのどちらにも導入できるように、ハーネス本体とプロジェクト正本を分離し、後からプロジェクト固有情報を初期化できる構造にしています。
+It gives AI agents the project rules, the next work to do, the checks that prove
+progress, and the points where a human must decide. Instead of asking every
+agent to guess the project context from a long prompt, owox-harness keeps the
+context, rules, requirements, decisions, and lessons in a project canon that can
+be generated into each supported AI tool.
 
-## 目的
+The goal is simple: AI and humans should always know what to do next, why it
+matters, and how to prove it is done.
 
-- 人間が判断し、AI はその判断に沿って実行する
-- 要件、仕様、判断理由、検証方針を分離して管理する
-- AI が参照すべき資料の入口を短く保つ
-- 変更理由と影響範囲を後から追える状態を作る
+Japanese README: `README.ja.md`
 
-## ディレクトリの考え方
+## Concept
 
-### `.agents/`
+owox-harness is for teams that want AI agents to do real work without turning
+the project into a pile of chat history, stale prompts, and unclear decisions.
 
-AI 専用領域です。プロジェクト定義、task 文脈キャッシュ、skill、補助スクリプトを置きます。
+It is built around five outcomes:
 
-### `docs/project/`
+- **The next step is always visible.** owox-harness can show open decisions,
+  ready tasks, required context, and checks, so neither the human nor the agent
+  has to rediscover the workflow each session.
+- **Progress can be declared and verified.** Requirements, tasks, decisions, and
+  checks are connected. Work is not just "done because the agent said so"; it
+  can point to the condition that proves it.
+- **Agents work with minimal context.** The agent receives the project facts it
+  needs for the current task, not every document in the repository. Less noise
+  means fewer missed rules and fewer invented assumptions.
+- **The harness grows with the project.** As the project changes, owox-harness
+  can record new rules, lessons, risks, skills, and checks, then use them in
+  later sessions.
+- **Experience can outlive one project.** Useful skills and lessons can be kept
+  as reusable experience, not trapped inside one repository or one AI tool.
 
-人間向けのプロジェクト正本です。要求、仕様、判断、用語、検証、外部連携、チーム資料を置きます。
+The core idea is not "AI does everything." The core idea is "people decide,
+AI executes, owox-harness keeps the work clear, and the project remembers."
 
-クローン直後のこのテンプレートでは、`docs/project/` は空に近いひな型だけを持ちます。プロジェクト固有の内容は `harness-init` 実行後に追加してください。
+Supported targets today:
 
-## 使い始め方
+- Codex CLI
+- Claude Code
 
-1. テンプレートを対象リポジトリに配置する
-2. 必要なら `.agents/scripts/sync_agent.sh` で利用するエージェント向け設定を同期する
-3. `harness-init` skill を使って `.agents/project.md` と必要な正本を初期化する
-4. 以後は `task-*` と `docs-update-*` を使って作業を進める
+## Install
 
-## エージェント設定の同期
+Install the `owox` executable from GitHub Releases.
 
-```bash
-bash .agents/scripts/sync_agent.sh <target> [--dry-run] [--force] [--snapshot-name <name>]
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/setup.sh | sh
 ```
 
-対応 target:
+Windows PowerShell:
 
-- `claude`
-- `copilot`
-- `cursor`
-- `opencode`
-- `crush`
-- `gemini`
-- `aider`
-- `kiro`
-
-同期前の状態へ戻すには次を使います。
-
-```bash
-bash .agents/scripts/restore_agent.sh [--snapshot <snapshot-id>] [--dry-run]
+```powershell
+irm https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/install.ps1 | iex
 ```
 
-## 典型的な流れ
+Then check the installed version:
 
-1. 人間が要求や制約を正本として定義する
-2. AI は `AGENTS.md` と `.agents/project.md` を入口に必要な資料だけ読む
-3. 実装や修正に伴って正本も更新する
-4. 検証後に task を閉じ、次に読むべき資料を残す
-5. `validate_harness.sh` でハーネス全体の整合性を確認する
+```sh
+owox --version
+```
 
-## ライセンス
+Default install locations:
 
-このリポジトリ本体は `LICENSE` の条件で提供されます。
+- Linux and macOS: `~/.local/bin`
+- Windows: `%LOCALAPPDATA%\owox\bin`
 
-一部の skill は第三者プロジェクトをもとにしています。第三者ライセンス表記は `NOTICE` を参照してください。
+Set `OWOX_BIN_DIR` to choose another location.
+Set `OWOX_VERSION` to install a fixed release, for example `owox-v0.1.0`.
+
+## Basic Use
+
+In a project that has an `.owox/` directory:
+
+```sh
+owox setup
+```
+
+This reads the project canon from `.owox/`, generates the agent setup files, and
+checks that the result can be used.
+
+For a project in another directory:
+
+```sh
+owox setup path/to/project
+```
+
+## Repository Layout
+
+This product repository contains:
+
+- `control/`: owox-harness source, docs, and tests
+- `target/`: local sandbox for verification
+- `.github/workflows/`: release workflow
+
+The main owox-harness docs live under `control/docs/`.
+
+## License
+
+MIT License. See `LICENSE`.
