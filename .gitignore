@@ -1,2 +1,3 @@
-docs/inbox/*
-!docs/inbox/.gitignore
+/target/
+
+.DS_Store
