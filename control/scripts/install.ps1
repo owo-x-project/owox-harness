@@ -11,7 +11,7 @@
 #   OWOX_REPO     リポジトリ。既定 owoDra/workspace
 $ErrorActionPreference = "Stop"
 
-$repo = if ($env:OWOX_REPO) { $env:OWOX_REPO } else { "owoDra/workspace" }
+$repo = if ($env:OWOX_REPO) { $env:OWOX_REPO } else { "owo-x-project/owox-harness" }
 $binDir = if ($env:OWOX_BIN_DIR) { $env:OWOX_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "owox\bin" }
 
 # CPU を target triple へ写像する。配布は x86_64 のみ。

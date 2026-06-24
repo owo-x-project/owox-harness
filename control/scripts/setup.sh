@@ -12,7 +12,7 @@
 #   OWOX_REPO     リポジトリ。既定 owoDra/workspace
 set -eu
 
-REPO="${OWOX_REPO:-owoDra/workspace}"
+REPO="${OWOX_REPO:-owo-x-project/owox-harness}"
 BIN_DIR="${OWOX_BIN_DIR:-$HOME/.local/bin}"
 
 err() {
