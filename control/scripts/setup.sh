@@ -1,15 +1,15 @@
 #!/usr/bin/env sh
-# owox-harness 導入スクリプト (linux / macOS)。
-# GitHub Releases から owox を取得し、SHA256SUMS で checksum 照合してから配置する
-# (control/docs/decisions/20260621-Phase10-配布とrelease正本.md)。
+# owox-harness installer script (Linux / macOS).
+# Downloads owox from GitHub Releases, verifies it with SHA256SUMS, then installs it
+# See release distribution policy in control/docs/decisions/.
 #
-# 使い方:
+# Usage:
 #   curl -fsSL https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/setup.sh | sh
 #
-# 環境変数:
-#   OWOX_VERSION  取得する版 (例 owox-v0.1.0 または 0.1.0)。既定は最新の owox-v*
-#   OWOX_BIN_DIR  配置先ディレクトリ。既定 $HOME/.local/bin
-#   OWOX_REPO     リポジトリ。既定 owoDra/workspace
+# Environment variables:
+#   OWOX_VERSION  Version to download (for example, owox-v0.1.0 or 0.1.0). Defaults to the latest owox-v*
+#   OWOX_BIN_DIR  Install directory. Defaults to $HOME/.local/bin
+#   OWOX_REPO     Repository. Defaults to owoDra/workspace
 set -eu
 
 REPO="${OWOX_REPO:-owo-x-project/owox-harness}"
@@ -20,7 +20,7 @@ err() {
 	exit 1
 }
 
-# OS と CPU を target triple へ写像する。
+# Map the OS and CPU to a target triple.
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os" in
@@ -28,73 +28,73 @@ Linux)
 	case "$arch" in
 	x86_64 | amd64) target="x86_64-unknown-linux-musl" ;;
 	aarch64 | arm64) target="aarch64-unknown-linux-gnu" ;;
-	*) err "未対応の CPU: $arch (linux)" ;;
+	*) err "unsupported CPU: $arch (linux)" ;;
 	esac
 	;;
 Darwin)
 	case "$arch" in
 	arm64 | aarch64) target="aarch64-apple-darwin" ;;
-	*) err "未対応の CPU: $arch (macOS は Apple Silicon のみ配布)" ;;
+	*) err "unsupported CPU: $arch (macOS is distributed for Apple Silicon only)" ;;
 	esac
 	;;
 *)
-	err "未対応の OS: $os (Windows は install.ps1 を使う)"
+	err "unsupported OS: $os (use install.ps1 on Windows)"
 	;;
 esac
 asset="owox-${target}.tar.gz"
 
-# checksum ツールを選ぶ。sha256sum か shasum のどちらか。
+# Select a checksum tool: sha256sum or shasum.
 if command -v sha256sum >/dev/null 2>&1; then
 	sha_check() { sha256sum -c -; }
 elif command -v shasum >/dev/null 2>&1; then
 	sha_check() { shasum -a 256 -c -; }
 else
-	err "sha256sum も shasum も無く checksum 照合できない"
+	err "neither sha256sum nor shasum is available; cannot verify checksum"
 fi
 
-# 版を解決する。未指定なら最新の owox-v* tag を Releases から拾う。
+# Resolve the version. If unset, use the latest owox-v* tag from Releases.
 tag="${OWOX_VERSION:-}"
 if [ -z "$tag" ]; then
 	tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" |
 		grep -o '"tag_name"[ ]*:[ ]*"owox-v[^"]*"' |
 		head -n1 |
 		sed 's/.*"\(owox-v[^"]*\)".*/\1/')"
-	[ -n "$tag" ] || err "最新の owox-v* リリースを見つけられない。OWOX_VERSION で指定する"
+	[ -n "$tag" ] || err "could not find the latest owox-v* release. Set OWOX_VERSION"
 elif [ "${tag#owox-v}" = "$tag" ]; then
-	# owox-v 接頭辞が無ければ補う (0.1.0 → owox-v0.1.0)。
+	# Add the owox-v prefix if missing (0.1.0 -> owox-v0.1.0).
 	tag="owox-v${tag#v}"
 fi
 
 base="https://github.com/${REPO}/releases/download/${tag}"
-echo "owox setup: ${tag} の ${asset} を取得する"
+echo "owox setup: downloading ${asset} from ${tag}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 curl -fsSL "${base}/${asset}" -o "${tmp}/${asset}" ||
-	err "成果物を取得できない: ${base}/${asset}"
+	err "could not download artifact: ${base}/${asset}"
 curl -fsSL "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" ||
-	err "SHA256SUMS を取得できない"
+	err "could not download SHA256SUMS"
 
-# 自分の成果物の行だけ照合する (SHA256SUMS は全成果物を含む)。
+# Verify only this artifact line (SHA256SUMS contains all artifacts).
 line="$(cd "$tmp" && grep "  ${asset}\$" SHA256SUMS)" ||
-	err "SHA256SUMS に ${asset} の行が無い"
+	err "SHA256SUMS has no line for ${asset}"
 echo "$line" | (cd "$tmp" && sha_check) ||
-	err "checksum が一致しない。配置を中止する"
+	err "checksum mismatch. Aborting installation"
 
-tar -xzf "${tmp}/${asset}" -C "$tmp" || err "展開できない"
-[ -f "${tmp}/owox" ] || err "成果物に owox が無い"
+tar -xzf "${tmp}/${asset}" -C "$tmp" || err "could not extract artifact"
+[ -f "${tmp}/owox" ] || err "artifact does not contain owox"
 
 mkdir -p "$BIN_DIR"
 mv "${tmp}/owox" "${BIN_DIR}/owox"
 chmod +x "${BIN_DIR}/owox"
 
-echo "owox setup: ${BIN_DIR}/owox へ配置した"
+echo "owox setup: installed to ${BIN_DIR}/owox"
 "${BIN_DIR}/owox" --version || true
 
 case ":${PATH}:" in
 *":${BIN_DIR}:"*) ;;
 *)
-	echo "owox setup: PATH に ${BIN_DIR} を加える (例: export PATH=\"${BIN_DIR}:\$PATH\")"
+	echo "owox setup: add ${BIN_DIR} to PATH (example: export PATH=\"${BIN_DIR}:\$PATH\")"
 	;;
 esac
