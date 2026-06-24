@@ -11,7 +11,7 @@ be generated into each supported AI tool.
 The goal is simple: AI and humans should always know what to do next, why it
 matters, and how to prove it is done.
 
-Japanese README: [README.ja.md](./README.ja.md)
+Language: English | [日本語](./README.ja.md)
 
 ## Concept
 
@@ -75,14 +75,11 @@ Set `OWOX_VERSION` to install a fixed release, for example `owox-v0.1.0`.
 
 ## Basic Use
 
-In a project that has an `.owox/` directory:
+Run this in the repository you want to develop:
 
 ```sh
 owox setup
 ```
-
-This reads the project canon from `.owox/`, generates the agent setup files, and
-checks that the result can be used.
 
 For a project in another directory:
 
@@ -95,7 +92,7 @@ owox setup path/to/project
 This product repository contains:
 
 - `control/`: owox-harness source, docs, and tests
-- `target/`: local sandbox for verification
+- `target/`: workspace for verification
 - `.github/workflows/`: release workflow
 
 The main owox-harness docs live under `control/docs/`.
