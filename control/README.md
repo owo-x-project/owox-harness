@@ -22,7 +22,7 @@ irm https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/inst
 
 - 既定の配置先は linux / macOS が `~/.local/bin`、Windows が `%LOCALAPPDATA%\owox\bin`。環境変数 `OWOX_BIN_DIR` で変えられる
 - 版を固定する時は `OWOX_VERSION=owox-v0.1.0` を渡す。無指定なら最新の `owox-v*`
-- 配布対象は linux (x86_64 / arm64)・macOS (Apple Silicon)・Windows (x86_64)
+- 配布対象は linux (x86_64 は `musl` 静的、arm64 は `gnu`)・macOS (Apple Silicon)・Windows (x86_64)
 - 導入後に `owox --version` で版を確認できる
 
 `owox` は常駐しない。利用は MCP が主入口で、`owox setup` が対象リポジトリへ設定を生成する。

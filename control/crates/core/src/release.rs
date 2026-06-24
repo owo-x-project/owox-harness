@@ -142,7 +142,7 @@ mod tests {
              file = \"Cargo.toml\"\n\
              pattern = '^version = \"(.+)\"'\n\
              [[artifacts]]\n\
-             name = \"owox-x86_64-unknown-linux-gnu.tar.gz\"\n\
+             name = \"owox-x86_64-unknown-linux-musl.tar.gz\"\n\
              [[checks]]\n\
              name = \"sha256\"\n\
              command = \"sha256sum -c SHA256SUMS\"\n",

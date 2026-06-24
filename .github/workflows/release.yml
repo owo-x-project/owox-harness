@@ -22,9 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar
+            use_musl_tools: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             archive: tar
@@ -39,6 +40,10 @@ jobs:
 
       - name: install rust target
         run: rustup target add ${{ matrix.target }}
+
+      - name: install musl tools
+        if: matrix.use_musl_tools == true
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: derive release version
         shell: bash

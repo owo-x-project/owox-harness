@@ -24,7 +24,7 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 
 - 配置: モノレポ root (`/workspace/product`) の `.github/workflows/release.yml`。tag は `owox-v*` で owox-harness 配布を他成果物から分離。ビルドは `control/` から
 - ビルド対象4種 (すべて native runner でクロスビルドを避ける)
-    - x86_64-unknown-linux-gnu
+    - x86_64-unknown-linux-musl
     - aarch64-unknown-linux-gnu
     - aarch64-apple-darwin
     - x86_64-pc-windows-msvc
@@ -34,6 +34,7 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
     - setup.sh: unix (linux / macOS) 用。OS と CPU を判定 → 対応成果物と SHA256SUMS を取得 → checksum 照合 → 実行ファイルを導入先へ配置。導入先は既定 `~/.local/bin`・環境変数で変更可
     - install.ps1: Windows 用。同手順を PowerShell で
 - 版: workspace 共通 version を `0.1.0` から開始。owox に `--version` / `-V` を追加し導入物の版を確認可能に
+- linux x86_64 は `musl` 静的リンクを採用。理由は Debian 12 相当 (`glibc 2.36`) で `GLIBC_2.39 not found` が出たため
 
 ### release.toml (対象プロジェクト向け任意正本)
 
@@ -48,6 +49,7 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 ## 理由
 
 - native runner 4種はクロスビルドの罠 (リンカ・sysroot) を避け、保守が軽い。GitHub は linux arm runner を公開済みで aarch64-linux も native で組める
+- linux x86_64 を `musl` へ寄せると、導入先の `glibc` 版差分をほぼ消せる。今回の不具合 (`GLIBC_2.39` 要求) へ直接効く
 - 1つの SHA256SUMS は setup.sh の照合を単純化し、成果物追加でスクリプトを増やさない
 - tag prefix `owox-v*` はモノレポの既存 tag (`v1`) と衝突せず、owox-harness 配布を独立して切れる
 - 導入先既定 `~/.local/bin` は sudo 不要で個人開発者 (第一対象) に素直
@@ -58,7 +60,6 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 
 - owox が成果物の SHA256 を Rust で計算する (sha2 等の新依存)
 - macOS x86_64・Windows arm のビルド
-- musl 静的リンクでの linux ビルド
 - 成果物ごとに個別 checksum ファイル
 - release.toml を必須正本にする
 - 配布物への署名 (cosign / minisign)
@@ -67,16 +68,15 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 
 - hash の新依存は依存追加条件に見合わず、検査委譲で代替できる
 - 対象を絞り native runner 4種に留めて保守を軽くする。需要が出たら見直す
-- musl は rmcp / tokio との組み合わせ検証が要り初期に重い。gnu で先に出す
 - 個別 checksum ファイルは setup.sh の取得とスクリプトを増やす
 - release.toml 必須化は配布運用の無い対象プロジェクトに無用な正本を強いる
 - checksum で当面足り、署名は技術スタックの見直し条件に従い必要時に足す
 
 ## 見直し条件
 
-- gnu ビルドが古い glibc の環境で動かない報告が出た時 (musl へ)
 - checksum で足りず署名が必要になった時 (技術スタックの見直し条件と同じ)
 - Windows arm / macOS x86_64 の需要が出た時
+- linux aarch64 でも `glibc` 差分報告が出た時 (`musl` へ)
 - release.toml の成果物検証で委譲だけでは粗く、owox 内 hash 計算が要ると分かった時
 - モノレポから control を独立リポジトリへ切り出す時 (.github の配置を見直す)
 

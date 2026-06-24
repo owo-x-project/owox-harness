@@ -12,6 +12,17 @@ test ! -d /workspace/product/control/.owox || {
 }
 
 mkdir -p /workspace/product/target
+mkdir -p /root/.codex /root/.claude /root/.claude-state /root/.config/anthropic /root/.npm-global/bin
+
+if test -L /root/.claude.json; then
+  :
+elif test -f /root/.claude.json; then
+  mv /root/.claude.json /root/.claude-state/claude.json
+  ln -s /root/.claude-state/claude.json /root/.claude.json
+else
+  touch /root/.claude-state/claude.json
+  ln -s /root/.claude-state/claude.json /root/.claude.json
+fi
 
 cp /tmp/host.gitconfig /root/.gitconfig || true
 git config --global --add safe.directory /workspace/product
@@ -40,10 +51,6 @@ fi
 
 if ! command -v claude >/dev/null 2>&1; then
   OWOX_RTK_SHIM=0 npm install -g @anthropic-ai/claude-code
-fi
-
-if ! command -v opencode >/dev/null 2>&1; then
-  OWOX_RTK_SHIM=0 npm install -g opencode-ai
 fi
 
 test -f /workspace/product/owox-harness.code-workspace || {

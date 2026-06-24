@@ -11,3 +11,15 @@ services:
     volumes:
       - ..:/workspace/product:cached
       - ${HOME}/.gitconfig:/tmp/host.gitconfig:ro,cached
+      - codex-data:/root/.codex
+      - claude-data:/root/.claude
+      - claude-state-data:/root/.claude-state
+      - anthropic-config-data:/root/.config/anthropic
+      - npm-global-data:/root/.npm-global
+
+volumes:
+  codex-data:
+  claude-data:
+  claude-state-data:
+  anthropic-config-data:
+  npm-global-data:
