@@ -1557,7 +1557,10 @@ mod tests {
     fn write_targets_extracts_destinations() {
         assert_eq!(write_targets("printf x >> a.txt"), vec!["a.txt"]);
         assert_eq!(write_targets("printf x >b.txt"), vec!["b.txt"]);
-        assert_eq!(write_targets("echo x | tee c.txt d.txt"), vec!["c.txt", "d.txt"]);
+        assert_eq!(
+            write_targets("echo x | tee c.txt d.txt"),
+            vec!["c.txt", "d.txt"]
+        );
         // sed -i は script も宛先候補に拾う (過剰側へ倒す設計・層 glob に当たらず無害)。
         assert!(write_targets("sed -i 's/a/b/' e.txt").contains(&"e.txt".to_string()));
         assert_eq!(write_targets("cp src.txt f.txt"), vec!["f.txt"]);

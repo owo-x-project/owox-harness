@@ -613,9 +613,7 @@ pub fn approve_gate_auto(owox_dir: &Path, today: &str, id: &str) -> Envelope {
 pub fn list_auto_pending(owox_dir: &Path) -> Result<Vec<Decision>, String> {
     Ok(list_decisions(owox_dir)?
         .into_iter()
-        .filter(|d| {
-            d.status == DecisionStatus::Adopted && d.auto_approved && !d.confirmed
-        })
+        .filter(|d| d.status == DecisionStatus::Adopted && d.auto_approved && !d.confirmed)
         .collect())
 }
 

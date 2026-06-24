@@ -44,6 +44,10 @@ pub use canon::{
     ProposeInput, apply_pending_canon_change, canon_add, canon_propose,
     propose_practice_from_correction, revert_pending_canon_change,
 };
+pub use canon_detect::{
+    BoundaryDraft, CanonDraft, IrreversibleDraft, LayerDraft, detect_canon_draft,
+    render_quality_toml, render_rules_markdown,
+};
 pub use commands::{Command, command_skills, load_commands};
 pub use decay::{
     DecayFinding, run_branch_memory_decay, run_code_decay, run_decay, run_knowledge_decay,
@@ -53,7 +57,6 @@ pub use envelope::{Envelope, Gate, Status};
 pub use experience::{export as experience_export, import as experience_import};
 pub use gate::{Enforcement, autonomy_enforcement, commit_blocks, compose, phase_enforcement};
 pub use glossary::lookup as glossary_lookup;
-pub use practices::lookup as practice_lookup;
 pub use hook::{
     GateAuthorization, GlossaryInjection, HookDecision, LayerGate, PolicyInjection, StopDecision,
     VerifyOutcome, commit_gate, floor_context, glossary_injection, is_git_commit,
@@ -70,10 +73,7 @@ pub use model::{
     HumanGate, Irreversible, ModelTier, Phase, Practice, Practices, Rules, ScopeKind, Settings,
     State, TargetSpec, Targets, VerifyCheck, VerifyConfig,
 };
-pub use canon_detect::{
-    BoundaryDraft, CanonDraft, IrreversibleDraft, LayerDraft, detect_canon_draft,
-    render_quality_toml, render_rules_markdown,
-};
+pub use practices::lookup as practice_lookup;
 pub use profile::{
     Architecture, Axes, AxisLean, Delivery, DetectSignals, PartialAxes, Prioritization, Profile,
     ProfileDraft, RequirementsShape, builtin_bundle_names, detect_profile, set_profile,
@@ -82,13 +82,13 @@ pub use quality::{
     Autonomy, Boundary, DecayConfig, Layer, Quality, QualityViolation, RoutineConfig, SizeBudget,
     run_brand, run_quality,
 };
-pub use release::{Release, VersionSource};
 pub use record::{
     Decision, DecisionLinks, DecisionStatus, ProposedChange, RecordInput, approve_gate,
     approve_gate_auto, confirm_auto_approval, gate_autonomy, list_auto_pending, list_decisions,
     list_gates, load_decision, mark_gate_consumed, record_decision,
     record_decision_with_authorization, record_decision_with_change, reject_decision,
 };
+pub use release::{Release, VersionSource};
 pub use requirement::{
     AcceptanceCriterion, CreateRequirementInput, CriterionInput, Met, Requirement, RequirementKind,
     RequirementLinks, RequirementStatus, UpdateRequirementInput, add_criterion, create_requirement,

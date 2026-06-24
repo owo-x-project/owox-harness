@@ -220,7 +220,13 @@ mod tests {
     fn add_with_aliases_then_lookup_by_alias() {
         let owox = tempdir();
         assert_eq!(
-            add(&owox, "20260621", "target harness | th | harness output", "generated files").status,
+            add(
+                &owox,
+                "20260621",
+                "target harness | th | harness output",
+                "generated files"
+            )
+            .status,
             Status::Ok
         );
         // 別名でも正規名でも引ける。返るのは正規名の定義。

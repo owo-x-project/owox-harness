@@ -71,9 +71,7 @@ impl RequirementKind {
         match value.trim() {
             "functional" => Ok(RequirementKind::Functional),
             "non-functional" => Ok(RequirementKind::NonFunctional),
-            other => Err(format!(
-                "kind は functional / non-functional のみ: {other}"
-            )),
+            other => Err(format!("kind は functional / non-functional のみ: {other}")),
         }
     }
 
@@ -669,7 +667,12 @@ pub fn create_requirement(
     // 便益・なぜは要件本文でなく来歴の領分。指定時は採用済み decision として残し要件へ link する
     // (PRFAQ の逆算の蒸留を行動の地点で固定する。`docs/decisions/20260620-要件分類とPRFAQ正本.md`)。
     let mut decision_ids = Vec::new();
-    if let Some(benefit) = input.benefit.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+    if let Some(benefit) = input
+        .benefit
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
         let record = record_decision(
             owox_dir,
             today,
@@ -1195,7 +1198,10 @@ mod tests {
         other.layer = None;
         let p = layer_progress(&[traced, untraced, other]);
         // core: 2 件中 1 件 trace 済み・(unlayered): 1 件中 1 件。
-        assert_eq!(p.iter().find(|(k, ..)| k == "core"), Some(&("core".to_string(), 2, 1)));
+        assert_eq!(
+            p.iter().find(|(k, ..)| k == "core"),
+            Some(&("core".to_string(), 2, 1))
+        );
         assert_eq!(
             p.iter().find(|(k, ..)| k == "(unlayered)"),
             Some(&("(unlayered)".to_string(), 1, 1))

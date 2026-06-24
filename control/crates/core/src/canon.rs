@@ -924,11 +924,7 @@ mod tests {
     #[test]
     fn revert_replace_restores_original() {
         let owox = tempdir();
-        std::fs::write(
-            owox.join("rules.md"),
-            "## Safety\n\n- never push --force\n",
-        )
-        .unwrap();
+        std::fs::write(owox.join("rules.md"), "## Safety\n\n- never push --force\n").unwrap();
         let env = canon_propose(
             &owox,
             "20260619",

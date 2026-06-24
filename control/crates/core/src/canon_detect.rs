@@ -305,7 +305,11 @@ mod tests {
     fn terraform_and_k8s_draft_irreversible() {
         let files = sig(&["infra/main.tf", "deploy/k8s/app.yaml"]);
         let d = detect(&files);
-        assert!(d.irreversible.iter().any(|i| i.detect.contains("terraform")));
+        assert!(
+            d.irreversible
+                .iter()
+                .any(|i| i.detect.contains("terraform"))
+        );
         assert!(d.irreversible.iter().any(|i| i.detect.contains("kubectl")));
     }
 

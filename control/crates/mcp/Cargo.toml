@@ -12,6 +12,10 @@ path = "src/main.rs"
 owox-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# setup の初回導入ウィザード。チェックボックス複数選択・入力欄・確認を提供する。
+dialoguer = "0.11"
+# dialoguer の見た目を owox のシアン基調へ寄せる。
+console = "0.15"
 # setup の検査で生成した .toml が解釈できるか確かめる (既存設定とのマージ崩れも捕る)。
 toml = "0.9"
 # MCP サーバ (owox serve) は公式 rust SDK rmcp を採用 (Phase 4 縦貫スライス)。

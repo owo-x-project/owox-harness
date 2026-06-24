@@ -316,8 +316,14 @@ mod tests {
         assert_eq!(data["completion"]["work"], "needs_human");
         // 要件ゼロは「未捕捉」と案内する。「トレース不足」と取り違えない。
         let reason = env.reason;
-        assert!(reason.contains("No requirements are captured yet"), "{reason}");
-        assert!(!reason.contains("lack a complete verification trace"), "{reason}");
+        assert!(
+            reason.contains("No requirements are captured yet"),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("lack a complete verification trace"),
+            "{reason}"
+        );
     }
 
     #[test]

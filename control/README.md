@@ -25,7 +25,7 @@ irm https://raw.githubusercontent.com/owoDra/workspace/main/control/scripts/inst
 - 配布対象は linux (x86_64 は `musl` 静的、arm64 は `gnu`)・macOS (Apple Silicon)・Windows (x86_64)
 - 導入後に `owox --version` で版を確認できる
 
-`owox` は常駐しない。利用は MCP が主入口で、`owox setup` が対象リポジトリへ設定を生成する。
+`owox` は常駐しない。利用は MCP が主入口で、`owox setup` が対象リポジトリへ設定を生成する。`.owox/` が無い repo では、`owox setup` が最小対話を始めて `.owox/` を初期化する。
 
 ## 開発の進め方
 

@@ -724,7 +724,8 @@ impl AutoApproval {
 
 /// profile.detect の draft を JSON 値へ。profile.detect / kickoff で共用する。
 fn profile_draft_value(draft: &owox_core::ProfileDraft) -> serde_json::Value {
-    let lean = |a: &owox_core::AxisLean| serde_json::json!({ "value": a.value, "evidence": a.evidence });
+    let lean =
+        |a: &owox_core::AxisLean| serde_json::json!({ "value": a.value, "evidence": a.evidence });
     serde_json::json!({
         "suggested_preset": draft.suggested_preset,
         "axes": {

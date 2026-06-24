@@ -193,7 +193,10 @@ fn pre_tool_use() -> ExitCode {
 
     // 使用履歴: シェル操作・編集の tool 名を 1 行追記する (best-effort)。
     // 入口コマンド (MCP tool) は serve 側の call_tool で記録するのでここでは拾わない (二重計上回避)。
-    if matches!(tool_name, "Bash" | "apply_patch" | "Edit" | "Write" | "MultiEdit") {
+    if matches!(
+        tool_name,
+        "Bash" | "apply_patch" | "Edit" | "Write" | "MultiEdit"
+    ) {
         owox_core::usage::record(
             &owox_dir(input.cwd.as_deref()),
             &crate::clock::today_utc(),
@@ -229,7 +232,10 @@ fn pre_tool_use() -> ExitCode {
             .resolve()
             .map(|a| a.layered_active())
             .unwrap_or(false);
-        let file_path = input.tool_input.as_ref().and_then(|t| t.file_path.as_deref());
+        let file_path = input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref());
         let work_dir = input
             .cwd
             .as_deref()

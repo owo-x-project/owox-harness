@@ -254,7 +254,8 @@ mod tests {
         assert_eq!(once, twice, "再マージで同じ結果 (冪等)");
     }
 
-    const OWOX_MCP: &str = "{\"mcpServers\":{\"owox\":{\"command\":\"owox\",\"args\":[\"serve\"]}}}";
+    const OWOX_MCP: &str =
+        "{\"mcpServers\":{\"owox\":{\"command\":\"owox\",\"args\":[\"serve\"]}}}";
 
     #[test]
     fn merge_json_into_empty_creates_block() {
@@ -266,7 +267,8 @@ mod tests {
     #[test]
     fn merge_json_preserves_human_keys_and_other_servers() {
         // 人間の permissions と別 MCP サーバを壊さず owox ブロックを足す。
-        let existing = r#"{"permissions":{"allow":["Bash"]},"mcpServers":{"other":{"command":"foo"}}}"#;
+        let existing =
+            r#"{"permissions":{"allow":["Bash"]},"mcpServers":{"other":{"command":"foo"}}}"#;
         let out = merge_json(existing, OWOX_MCP).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["permissions"]["allow"][0], "Bash");
