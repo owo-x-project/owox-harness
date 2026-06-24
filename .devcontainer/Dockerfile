@@ -41,10 +41,7 @@ RUN install -d /usr/local/rtk-shims \
   done \
   && printf '%s\n' 'export PATH="/usr/local/rtk-shims:${PATH}"' >/etc/profile.d/zz-rtk-shims.sh
 
-ENV HEADROOM_BASE_URL=http://headroom:8787 \
-  HEADROOM_TELEMETRY=off \
-  OPENAI_BASE_URL=http://headroom:8787/v1 \
-  OWOX_RTK_SHIM=1 \
+ENV OWOX_RTK_SHIM=1 \
   RTK_TELEMETRY_DISABLED=1
 
 WORKDIR /workspace/product/control

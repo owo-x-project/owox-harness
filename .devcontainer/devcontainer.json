@@ -1,11 +1,10 @@
-{
+d{
   "name": "owox-harness-control",
   "dockerComposeFile": "compose.yml",
   "service": "control",
   "remoteUser": "root",
   "runServices": [
-    "control",
-    "headroom"
+    "control"
   ],
   "features": {
     "ghcr.io/devcontainers/features/node:2.0.0": {

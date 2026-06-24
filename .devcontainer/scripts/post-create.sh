@@ -13,6 +13,7 @@ test ! -d /workspace/product/control/.owox || {
 
 mkdir -p /workspace/product/target
 
+cp /tmp/host.gitconfig /root/.gitconfig || true
 git config --global --add safe.directory /workspace/product
 git config --global --add safe.directory /workspace/product/target
 
@@ -29,7 +30,7 @@ else
 fi
 
 if ! command -v codex >/dev/null 2>&1; then
-  npm install -g @openai/codex
+  OWOX_RTK_SHIM=0 npm install -g @openai/codex
 fi
 
 if command -v rtk >/dev/null 2>&1; then
@@ -38,11 +39,11 @@ if command -v rtk >/dev/null 2>&1; then
 fi
 
 if ! command -v claude >/dev/null 2>&1; then
-  npm install -g @anthropic-ai/claude-code
+  OWOX_RTK_SHIM=0 npm install -g @anthropic-ai/claude-code
 fi
 
 if ! command -v opencode >/dev/null 2>&1; then
-  npm install -g opencode-ai
+  OWOX_RTK_SHIM=0 npm install -g opencode-ai
 fi
 
 test -f /workspace/product/owox-harness.code-workspace || {
