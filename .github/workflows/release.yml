@@ -58,7 +58,7 @@ jobs:
           from pathlib import Path
 
           path = Path("Cargo.toml")
-          text = path.read_text()
+          text = path.read_text(encoding="utf-8")
           version = os.environ["RELEASE_VERSION"]
           updated, count = re.subn(
               r'(?m)^version = "[^"]+"$',
@@ -68,7 +68,7 @@ jobs:
           )
           if count != 1:
               raise SystemExit("workspace.package.version not found")
-          path.write_text(updated)
+          path.write_text(updated, encoding="utf-8")
           PY
 
       - name: build
