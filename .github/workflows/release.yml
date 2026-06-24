@@ -143,6 +143,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: pin control harness to released version
         run: echo "${{ github.ref_name }}" > control/.owox-version
@@ -150,6 +152,7 @@ jobs:
       - name: create pull request
         uses: peter-evans/create-pull-request@v6
         with:
+          base: ${{ github.event.repository.default_branch }}
           branch: automation/bump-control-${{ github.ref_name }}
           delete-branch: true
           commit-message: "chore(control): bump owox version to ${{ github.ref_name }}"
