@@ -51,4 +51,17 @@ test -f /workspace/product/owox-harness.code-workspace || {
   exit 1
 }
 
+test -f /workspace/product/control/.owox-version || {
+  echo "ERROR: /workspace/product/control/.owox-version is missing" >&2
+  exit 1
+}
+
+OWOX_VERSION="$(tr -d '\r\n' </workspace/product/control/.owox-version)"
+test -n "$OWOX_VERSION" || {
+  echo "ERROR: /workspace/product/control/.owox-version is empty" >&2
+  exit 1
+}
+
+OWOX_VERSION="$OWOX_VERSION" bash /workspace/product/control/scripts/setup.sh
+
 echo "owox-harness control harness is ready"

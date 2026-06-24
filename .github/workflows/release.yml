@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   build:
@@ -39,8 +40,44 @@ jobs:
       - name: install rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: derive release version
+        shell: bash
+        run: echo "RELEASE_VERSION=${GITHUB_REF_NAME#owox-v}" >> "$GITHUB_ENV"
+
+      - name: inject release version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          version = os.environ["RELEASE_VERSION"]
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("workspace.package.version not found")
+          path.write_text(updated)
+          PY
+
       - name: build
         run: cargo build --release --bin owox --target ${{ matrix.target }}
+
+      - name: verify built version
+        shell: bash
+        run: |
+          exe="target/${{ matrix.target }}/release/owox"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            exe="${exe}.exe"
+          fi
+          got="$("$exe" --version)"
+          test "$got" = "owox ${RELEASE_VERSION}"
 
       - name: package (unix)
         if: matrix.archive == 'tar'
@@ -94,3 +131,25 @@ jobs:
               --title "${{ github.ref_name }}" \
               --generate-notes
           fi
+
+  bump-control-version:
+    name: bump control version
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: pin control harness to released version
+        run: echo "${{ github.ref_name }}" > control/.owox-version
+
+      - name: create pull request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: automation/bump-control-${{ github.ref_name }}
+          delete-branch: true
+          commit-message: "chore(control): bump owox version to ${{ github.ref_name }}"
+          title: "chore(control): bump owox version to ${{ github.ref_name }}"
+          body: |
+            - released version: `${{ github.ref_name }}`
+            - source release: `https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}`
+            - after merge, devcontainer post-create installs this fixed version
