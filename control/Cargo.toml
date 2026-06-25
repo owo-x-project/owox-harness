@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["crates/core", "crates/mcp"]
 
-# 配布する版は workspace 共通 (`docs/decisions/20260621-Phase10-配布とrelease正本.md`)。
-# tag は owox-v<version>。owox --version がこの値を出す。
+# 通常ビルドの版。配布時は `.owox-version` から workflow が注入する
+# (`docs/decisions/20260621-Phase10-配布とrelease正本.md`)。
 [workspace.package]
 version = "0.1.0"
