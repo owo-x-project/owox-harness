@@ -8,6 +8,7 @@ pub mod canon;
 pub mod canon_detect;
 pub mod commands;
 pub mod decay;
+pub mod delivery;
 pub mod envelope;
 pub mod experience;
 pub mod gate;
@@ -53,15 +54,18 @@ pub use decay::{
     DecayFinding, run_branch_memory_decay, run_code_decay, run_decay, run_knowledge_decay,
     run_practice_decay, run_practice_redundancy,
 };
+pub use delivery::{
+    DeliveryOperation, DeliveryRequest, DeliverySelection, render_delivery_block, select_delivery,
+};
 pub use envelope::{Envelope, Gate, Status};
 pub use experience::{export as experience_export, import as experience_import};
 pub use gate::{Enforcement, autonomy_enforcement, commit_blocks, compose, phase_enforcement};
 pub use glossary::lookup as glossary_lookup;
 pub use hook::{
-    GateAuthorization, GlossaryInjection, HookDecision, LayerGate, PolicyInjection, StopDecision,
-    VerifyOutcome, commit_gate, floor_context, glossary_injection, is_git_commit,
-    layer_pre_action_gate, parse_patch_changes, policy_injection, pre_tool_use_decision,
-    render_rules_block, render_skills_section, stop_decision,
+    GateAuthorization, GlossaryInjection, HookDecision, LayerGate, PatchChange, PatchOp,
+    PolicyInjection, StopDecision, VerifyOutcome, commit_gate, floor_context, glossary_injection,
+    is_git_commit, layer_pre_action_gate, parse_patch_changes, policy_injection,
+    pre_tool_use_decision, render_rules_block, render_skills_section, stop_decision, write_targets,
 };
 pub use knowledge::{
     Knowledge, KnowledgeInput, KnowledgeStatus, add_knowledge, get_knowledge, list_knowledge,

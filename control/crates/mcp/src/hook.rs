@@ -114,11 +114,10 @@ fn push_block(buf: &mut String, block: &str) {
     buf.push_str(block);
 }
 
-/// UserPromptSubmit。プロンプトに現れた用語定義と、rules/brand 関連語に応じた本文を能動 push する。
+/// UserPromptSubmit。プロンプトに現れた用語定義だけを能動 push する。
 ///
-/// 用語名は床コンテキストに常時。意味が要る時にこの hook が定義を push する。さらに rules/policy/
-/// delete 等の語が出たら `## Rules` を、brand 関連語が出たら brand リストを届ける (段階的開示)。
-/// モデルが探しに行く前・ユーザーが tool 名を言わなくても届くので最小コンテキストで効く。
+/// 用語名は床コンテキストに常時。意味が要る時にこの hook が定義を push する。
+/// rules / practices は語彙推定でなく、実際の操作と path で出す。ここでは扱わない。
 /// 一致が無い・正本が読めない時は素通り (作業を妨げない)。session 内の既出は除く。
 fn user_prompt_submit() -> ExitCode {
     let input = read_input();
@@ -137,10 +136,6 @@ fn user_prompt_submit() -> ExitCode {
     if let Some(inj) = owox_core::glossary_injection(&canon, prompt, &already) {
         push_block(&mut context, &inj.context);
         keys.extend(inj.terms);
-    }
-    if let Some(inj) = owox_core::policy_injection(&canon, prompt, &already, false) {
-        push_block(&mut context, &inj.context);
-        keys.extend(inj.keys);
     }
 
     // 訂正検知 (決定論シグナル)。AI が編集した後で人間が新たに発話し、作業ツリーに変更が残る時、
@@ -181,6 +176,11 @@ fn is_edit_tool(tool_name: &str) -> bool {
     matches!(tool_name, "apply_patch" | "Edit" | "Write" | "MultiEdit")
 }
 
+/// 読取前用語走査の対象。
+fn is_read_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "Read" | "Open")
+}
+
 /// PreToolUse。
 ///
 /// 1. 不可逆操作なら deny で止める (機械強制。最優先)
@@ -190,6 +190,10 @@ fn pre_tool_use() -> ExitCode {
     let input = read_input();
     let tool_name = input.tool_name.as_deref().unwrap_or_default();
     let command = input.tool_input.as_ref().and_then(|t| t.command.as_deref());
+    let file_path = input
+        .tool_input
+        .as_ref()
+        .and_then(|t| t.file_path.as_deref());
 
     // 使用履歴: シェル操作・編集の tool 名を 1 行追記する (best-effort)。
     // 入口コマンド (MCP tool) は serve 側の call_tool で記録するのでここでは拾わない (二重計上回避)。
@@ -224,6 +228,21 @@ fn pre_tool_use() -> ExitCode {
         return deny_pre_tool_use(reason);
     }
 
+    if is_read_tool(tool_name)
+        && let Some(path) = file_path
+        && reads_canon_path(path)
+    {
+        return deny_pre_tool_use(
+            "Do not read the project canon under .owox/ directly. Its guidance reaches you through the session context and the owox tools; look up a glossary term with glossary.lookup, and to change or remove canon use canon.propose. You may read and write skills under .owox/skills/.".to_string(),
+        );
+    }
+
+    if edits_rules_file(&input) {
+        return deny_pre_tool_use(
+            "Do not edit .owox/rules.md directly. Rules and their delivery triggers are fixed canon. Add with canon.add, and change or remove with canon.propose so a human approves it.".to_string(),
+        );
+    }
+
     // 層別自律度の操作前ゲート。architecture=layered の時だけ効く。guarded 層の削除・契約面編集を
     // 操作前に人間ゲートへ回す (`docs/decisions/20260618-Phase9-性質軸適応機構.md`)。
     if let Some(canon) = canon.as_ref() {
@@ -232,10 +251,6 @@ fn pre_tool_use() -> ExitCode {
             .resolve()
             .map(|a| a.layered_active())
             .unwrap_or(false);
-        let file_path = input
-            .tool_input
-            .as_ref()
-            .and_then(|t| t.file_path.as_deref());
         let work_dir = input
             .cwd
             .as_deref()
@@ -272,28 +287,30 @@ fn pre_tool_use() -> ExitCode {
     }
 
     let mut context = String::new();
-
-    // 編集直前: change/deletion/safety policy を一度届け (force_rules)、編集対象の内容に出た用語
-    // 定義と brand 関連語の本文も push する (段階的開示)。session 内の既出区分・用語は除く。
-    // 用語定義は内容がある時だけ、rules は内容が無くても届ける (編集という行為が合図)。
-    if is_edit_tool(tool_name)
-        && let Some(canon) = canon.as_ref()
-    {
+    // 読取前: 対象ファイルの先頭だけ軽く読み、出た用語の定義だけ届ける。
+    // 操作前: operation/path に応じた rules / practices を届ける。
+    if let Some(canon) = canon.as_ref() {
         let already = read_injected_terms(input.cwd.as_deref(), input.session_id.as_deref());
-        let content = command.unwrap_or("");
-        let mut keys: Vec<String> = Vec::new();
-        if !content.is_empty()
-            && let Some(inj) = owox_core::glossary_injection(canon, content, &already)
+        let mut terms: Vec<String> = Vec::new();
+        if let Some(content) = glossary_scan_text(&input)
+            && let Some(inj) = owox_core::glossary_injection(canon, &content, &already)
         {
             push_block(&mut context, &inj.context);
-            keys.extend(inj.terms);
+            terms.extend(inj.terms);
         }
-        if let Some(inj) = owox_core::policy_injection(canon, content, &already, true) {
-            push_block(&mut context, &inj.context);
-            keys.extend(inj.keys);
+        let delivery_paths = pre_tool_use_delivery_paths(&input);
+        let delivery_ops = pre_tool_use_delivery_operations(&input, &delivery_paths);
+        if let Ok(selection) = owox_core::select_delivery(
+            &owox_dir(input.cwd.as_deref()),
+            owox_core::DeliveryRequest::for_operations(&delivery_ops, &delivery_paths),
+        ) {
+            let block = owox_core::render_delivery_block(&selection);
+            if !block.is_empty() {
+                push_block(&mut context, &block);
+            }
         }
-        if !keys.is_empty() {
-            remember_terms(input.cwd.as_deref(), input.session_id.as_deref(), &keys);
+        if !terms.is_empty() {
+            remember_terms(input.cwd.as_deref(), input.session_id.as_deref(), &terms);
         }
     }
 
@@ -616,6 +633,15 @@ fn session_start() -> ExitCode {
         .unwrap_or(crate::cache::Mission::Work);
     context.push_str(&format!("Current mission: {}.\n\n", mission.as_str()));
     context.push_str(&current_pressure_line(&owox, &canon));
+    if let Ok(selection) =
+        owox_core::select_delivery(&owox, owox_core::DeliveryRequest::session_start())
+    {
+        let block = owox_core::render_delivery_block(&selection);
+        if !block.is_empty() {
+            context.push('\n');
+            context.push_str(&block);
+        }
+    }
     context.push_str(
         "Use context scope=\"codebase\" when you need a repo map before choosing files to read.\n",
     );
@@ -877,6 +903,315 @@ fn remember_terms(cwd: Option<&str>, session_id: Option<&str>, new_terms: &[Stri
 /// `.owox/.gitignore` に `.cache/` を冪等に足す。キャッシュを履歴へ乗せない。
 fn ensure_cache_ignored(cwd: Option<&str>) {
     crate::cache::ensure_ignored(&owox_dir(cwd));
+}
+
+/// 読取前に軽く走査する本文。repo 内の text file だけ、各 file 8KB まで。
+fn glossary_scan_text(input: &HookInput) -> Option<String> {
+    let work_dir = input.cwd.as_deref().map(PathBuf::from)?;
+    let paths = glossary_scan_targets(input, &work_dir);
+    if paths.is_empty() {
+        return None;
+    }
+    let mut blocks = Vec::new();
+    for path in paths {
+        if let Some(text) = read_text_prefix(&path, 8 * 1024) {
+            blocks.push(text);
+        }
+    }
+    (!blocks.is_empty()).then(|| blocks.join("\n"))
+}
+
+fn glossary_scan_targets(input: &HookInput, work_dir: &Path) -> Vec<PathBuf> {
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    if is_read_tool(tool_name)
+        && let Some(path) = input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref())
+    {
+        return repo_local_paths(work_dir, &[path.to_string()]);
+    }
+    if tool_name != "Bash" {
+        return Vec::new();
+    }
+    let command = input
+        .tool_input
+        .as_ref()
+        .and_then(|t| t.command.as_deref())
+        .unwrap_or_default();
+    repo_local_paths(work_dir, &bash_read_targets(command))
+}
+
+fn bash_read_targets(command: &str) -> Vec<String> {
+    let tokens: Vec<String> = command
+        .split_whitespace()
+        .map(|t| t.trim_matches(['"', '\'', '`']).to_string())
+        .collect();
+    let Some(program) = tokens.first().map(String::as_str) else {
+        return Vec::new();
+    };
+    match program {
+        "cat" => tokens
+            .iter()
+            .skip(1)
+            .filter(|t| !t.starts_with('-'))
+            .cloned()
+            .collect(),
+        "head" | "tail" => {
+            let mut out = Vec::new();
+            let mut skip_next = false;
+            for token in tokens.iter().skip(1) {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if token == "-n" {
+                    skip_next = true;
+                    continue;
+                }
+                if token.starts_with('-') {
+                    continue;
+                }
+                out.push(token.clone());
+            }
+            out
+        }
+        "sed" => {
+            let mut seen_script = false;
+            let mut out = Vec::new();
+            let mut skip_next = false;
+            for token in tokens.iter().skip(1) {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if token == "-n" || token == "-e" {
+                    skip_next = token == "-e";
+                    continue;
+                }
+                if token.starts_with('-') {
+                    continue;
+                }
+                if !seen_script {
+                    seen_script = true;
+                    continue;
+                }
+                out.push(token.clone());
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn repo_local_paths(work_dir: &Path, raw_paths: &[String]) -> Vec<PathBuf> {
+    raw_paths
+        .iter()
+        .filter(|p| !p.is_empty() && !reads_canon_path(p))
+        .filter_map(|path| {
+            let joined = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                work_dir.join(path)
+            };
+            let canon = joined.canonicalize().ok()?;
+            canon.starts_with(work_dir).then_some(canon)
+        })
+        .collect()
+}
+
+fn pre_tool_use_delivery_paths(input: &HookInput) -> Vec<String> {
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    let cwd = input.cwd.as_deref().map(PathBuf::from);
+    match tool_name {
+        "Read" | "Open" | "Edit" | "Write" | "MultiEdit" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref())
+            .map(|p| vec![relativize_input_path(cwd.as_deref(), p)])
+            .unwrap_or_default(),
+        "apply_patch" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|patch| {
+                owox_core::parse_patch_changes(patch)
+                    .into_iter()
+                    .map(|c| relativize_input_path(cwd.as_deref(), &c.path))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "Bash" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|cmd| {
+                bash_read_targets(cmd)
+                    .into_iter()
+                    .map(|p| relativize_input_path(cwd.as_deref(), &p))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn edits_rules_file(input: &HookInput) -> bool {
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    let cwd = input.cwd.as_deref().map(PathBuf::from);
+    match tool_name {
+        "Edit" | "Write" | "MultiEdit" | "Read" | "Open" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref())
+            .map(|p| is_rules_path(&relativize_input_path(cwd.as_deref(), p)))
+            .unwrap_or(false),
+        "apply_patch" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|patch| {
+                owox_core::parse_patch_changes(patch)
+                    .iter()
+                    .any(|c| is_rules_path(&relativize_input_path(cwd.as_deref(), &c.path)))
+            })
+            .unwrap_or(false),
+        "Bash" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|cmd| {
+                owox_core::write_targets(cmd)
+                    .iter()
+                    .map(|p| relativize_input_path(cwd.as_deref(), p))
+                    .any(|p| is_rules_path(&p))
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn pre_tool_use_delivery_operations(
+    input: &HookInput,
+    delivery_paths: &[String],
+) -> Vec<owox_core::DeliveryOperation> {
+    let mut ops = Vec::new();
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    match tool_name {
+        "Read" | "Open" => push_unique(&mut ops, owox_core::DeliveryOperation::Read),
+        "Edit" | "Write" | "MultiEdit" => push_unique(&mut ops, owox_core::DeliveryOperation::Edit),
+        "apply_patch" => {
+            push_unique(&mut ops, owox_core::DeliveryOperation::Edit);
+            if input
+                .tool_input
+                .as_ref()
+                .and_then(|t| t.command.as_deref())
+                .map(|patch| {
+                    owox_core::parse_patch_changes(patch)
+                        .iter()
+                        .any(|c| c.op == owox_core::PatchOp::Delete)
+                })
+                .unwrap_or(false)
+            {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Delete);
+            }
+        }
+        "Bash" => {
+            let command = input
+                .tool_input
+                .as_ref()
+                .and_then(|t| t.command.as_deref())
+                .unwrap_or_default();
+            if !bash_read_targets(command).is_empty() {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Read);
+            }
+            if owox_core::is_git_commit(command) {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Commit);
+            }
+            if is_delete_command(command) {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Delete);
+            }
+        }
+        _ => {}
+    }
+    for op in path_derived_operations(delivery_paths) {
+        push_unique(&mut ops, op);
+    }
+    ops
+}
+
+fn relativize_input_path(cwd: Option<&Path>, path: &str) -> String {
+    let raw = PathBuf::from(path.trim_matches(['"', '\'', '`']));
+    if let (Some(cwd), true) = (cwd, raw.is_absolute())
+        && let Ok(rel) = raw.strip_prefix(cwd)
+    {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    raw.to_string_lossy().replace('\\', "/")
+}
+
+fn is_delete_command(command: &str) -> bool {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    matches!(tokens.first().copied(), Some("rm"))
+        || matches!(tokens.first().copied(), Some("git")) && tokens.get(1) == Some(&"rm")
+}
+
+fn path_derived_operations(paths: &[String]) -> Vec<owox_core::DeliveryOperation> {
+    let mut out = Vec::new();
+    for path in paths {
+        if is_dependency_path(path) {
+            push_unique(&mut out, owox_core::DeliveryOperation::DependencyChange);
+        }
+        if path.starts_with(".owox/requirements/") {
+            push_unique(&mut out, owox_core::DeliveryOperation::RequirementChange);
+        }
+        if path.starts_with(".owox/skills/") {
+            push_unique(&mut out, owox_core::DeliveryOperation::SkillChange);
+        }
+        if path.starts_with(".owox/") && !path.starts_with(".owox/skills/") {
+            push_unique(&mut out, owox_core::DeliveryOperation::CanonChange);
+        }
+    }
+    out
+}
+
+fn is_dependency_path(path: &str) -> bool {
+    matches!(
+        path,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "go.mod"
+            | "go.sum"
+    )
+}
+
+fn is_rules_path(path: &str) -> bool {
+    path == ".owox/rules.md" || path.ends_with("/.owox/rules.md")
+}
+
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+fn read_text_prefix(path: &Path, max_bytes: usize) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let head = &bytes[..bytes.len().min(max_bytes)];
+    Some(String::from_utf8_lossy(head).into_owned())
+}
+
+fn reads_canon_path(path: &str) -> bool {
+    let norm = path.trim_matches(['"', '\'', '`']).replace('\\', "/");
+    (norm == ".owox" || norm.contains(".owox/")) && !norm.contains(".owox/skills/")
 }
 
 /// stdin を読み、hook 入力 JSON を解釈する。空・不正なら既定値。

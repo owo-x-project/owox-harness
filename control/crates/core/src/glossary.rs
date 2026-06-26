@@ -53,6 +53,25 @@ fn find_term<'a>(glossary: &'a Glossary, term: &str) -> Option<&'a crate::model:
     })
 }
 
+/// 部分一致候補。正規名または別名に query が含まれるもの。
+fn partial_candidates<'a>(
+    glossary: &'a Glossary,
+    query: &str,
+) -> Vec<&'a crate::model::GlossaryEntry> {
+    let lower = query.trim().to_lowercase();
+    if lower.is_empty() {
+        return Vec::new();
+    }
+    glossary
+        .entries
+        .iter()
+        .filter(|e| {
+            e.term.to_lowercase().contains(&lower)
+                || e.aliases.iter().any(|a| a.to_lowercase().contains(&lower))
+        })
+        .collect()
+}
+
 /// glossary.lookup。用語の定義を引く。見つからなければ found=false で返す。
 pub fn lookup(owox_dir: &Path, term: &str) -> Envelope {
     let glossary = match load(owox_dir) {
@@ -62,12 +81,44 @@ pub fn lookup(owox_dir: &Path, term: &str) -> Envelope {
     match find_term(&glossary, term) {
         Some(entry) => Envelope::ok(
             format!("Definition of {}.", entry.term),
-            json!({ "found": true, "term": entry.term, "aliases": entry.aliases, "definition": entry.definition }),
+            json!({
+                "found": true,
+                "match": "exact",
+                "term": entry.term,
+                "aliases": entry.aliases,
+                "definition": entry.definition
+            }),
         ),
-        None => Envelope::ok(
-            format!("No project-specific definition for \"{term}\"."),
-            json!({ "found": false, "term": term }),
-        ),
+        None => {
+            let candidates: Vec<_> = partial_candidates(&glossary, term)
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "term": entry.term,
+                        "aliases": entry.aliases,
+                    })
+                })
+                .collect();
+            if candidates.is_empty() {
+                Envelope::ok(
+                    format!("No project-specific definition for \"{term}\"."),
+                    json!({ "found": false, "match": "none", "term": term, "candidates": [] }),
+                )
+            } else {
+                Envelope::ok(
+                    format!(
+                        "No exact glossary match for \"{term}\". Found {} candidate(s).",
+                        candidates.len()
+                    ),
+                    json!({
+                        "found": false,
+                        "match": "candidate",
+                        "term": term,
+                        "candidates": candidates
+                    }),
+                )
+            }
+        }
     }
 }
 
@@ -179,6 +230,7 @@ mod tests {
         let env = lookup(&owox, "Canon"); // 大文字小文字を無視
         let data = env.data.unwrap();
         assert_eq!(data["found"], true);
+        assert_eq!(data["match"], "exact");
         assert_eq!(data["definition"], "source of truth");
     }
 
@@ -272,6 +324,22 @@ mod tests {
         let env = lookup(&owox, "nope");
         assert_eq!(env.status, Status::Ok);
         assert_eq!(env.data.unwrap()["found"], false);
+    }
+
+    #[test]
+    fn lookup_returns_partial_candidates() {
+        let owox = tempdir();
+        add(
+            &owox,
+            "20260621",
+            "target harness | harness output",
+            "generated files",
+        );
+        let env = lookup(&owox, "target");
+        let data = env.data.unwrap();
+        assert_eq!(data["found"], false);
+        assert_eq!(data["match"], "candidate");
+        assert_eq!(data["candidates"][0]["term"], "target harness");
     }
 
     // 変更・削除は canon.propose (crate::canon) のテストで担保する。

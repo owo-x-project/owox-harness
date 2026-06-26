@@ -817,7 +817,7 @@ fn rm_targets(command: &str) -> Vec<String> {
 /// 拾うのはリダイレクト (`>` `>>` の連結/分離・`2>` `&>` 等)・`tee`・`sed -i`・`cp`/`mv` の宛先・`dd of=`。
 /// 完全な shell 解析はしない (近似)。過剰に拾っても層 glob に当たらなければ無害なので、取りこぼしより
 /// 過剰側へ倒す。`rm`/`git rm` の削除は `rm_targets` が別に拾う。
-fn write_targets(command: &str) -> Vec<String> {
+pub fn write_targets(command: &str) -> Vec<String> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut targets = Vec::new();
     let mut i = 0;

@@ -1317,7 +1317,11 @@ impl OwoxServer {
     async fn review_lenses(&self) -> Result<CallToolResult, McpError> {
         let work_dir = self.owox_dir.parent().unwrap_or(&self.owox_dir);
         let changed = crate::files::changed_files(work_dir);
-        self.envelope_result(review_lenses_envelope(&self.owox_dir, &changed))
+        let mut env = review_lenses_envelope(&self.owox_dir, &changed);
+        let mut ops = vec![owox_core::DeliveryOperation::Review];
+        ops.extend(path_change_operations(&changed));
+        attach_delivery_guidance(&mut env, &self.owox_dir, &ops, &changed);
+        self.envelope_result(env)
     }
 
     /// 完了を3区別して返す。検証完了だけ機械判定、作業・要件完了は人間判断。
@@ -1380,6 +1384,48 @@ impl OwoxServer {
             &today_utc(),
         ));
         let mut env = run_verify(&canon.verify, &requirements, &quality, &decay, work_dir);
+        let changed = crate::files::changed_files(work_dir);
+        let mut ops = vec![owox_core::DeliveryOperation::Verify];
+        ops.extend(path_change_operations(&changed));
+        attach_delivery_guidance(&mut env, &self.owox_dir, &ops, &changed);
+        let reference_files: Vec<crate::files::ChangedFile> =
+            crate::files::list_repo_files(work_dir)
+                .into_iter()
+                .filter_map(|path| {
+                    let kind = crate::files::classify_path(&path);
+                    matches!(
+                        kind,
+                        crate::files::FileKind::Source | crate::files::FileKind::Docs
+                    )
+                    .then_some(crate::files::ChangedFile {
+                        path,
+                        previous_path: None,
+                        status: crate::files::ChangeStatus::Modified,
+                        kind,
+                    })
+                })
+                .collect();
+        let refs = scan_references(work_dir, &reference_files, &requirements, &decisions);
+        merge_data(
+            &mut env,
+            "references",
+            serde_json::json!({
+                "requirement_refs": refs.summary.requirement_refs,
+                "decision_refs": refs.summary.decision_refs,
+                "broken_refs": refs.summary.broken_refs,
+                "broken": refs.broken,
+            }),
+        );
+        if refs.summary.broken_refs > 0 {
+            env.status = owox_core::Status::Failed;
+            env.reason = "Broken owox references found.".to_string();
+            let mut next = env.next_actions.clone();
+            next.insert(
+                0,
+                "Fix the broken references listed in data.references.broken.".to_string(),
+            );
+            env.next_actions = next;
+        }
         // 今走らせた作業ツリーの署名と検査結果を覚える。Stop は署名一致で「verify.run 済み・以降
         // 変更なし」を判定し (合否は問わない)、commit ゲートは署名一致なら検査結果を再利用して
         // 検査の二重実行を避ける。
@@ -2125,6 +2171,81 @@ fn merge_data(env: &mut Envelope, key: &str, value: serde_json::Value) {
     }
 }
 
+fn attach_delivery_guidance(
+    env: &mut Envelope,
+    owox_dir: &Path,
+    ops: &[owox_core::DeliveryOperation],
+    paths: &[String],
+) {
+    let selection = owox_core::select_delivery(
+        owox_dir,
+        owox_core::DeliveryRequest::for_operations(ops, paths),
+    )
+    .unwrap_or_default();
+    if selection.rules.is_empty() && selection.practices.is_empty() {
+        return;
+    }
+    merge_data(
+        env,
+        "guidance",
+        serde_json::json!({
+            "rules": selection.rules,
+            "practices": selection.practices,
+        }),
+    );
+    let mut actions = env.next_actions.clone();
+    if !selection.rules.is_empty() {
+        actions.push("Review the relevant rules in data.guidance.rules.".to_string());
+    }
+    if !selection.practices.is_empty() {
+        actions.push("Review the relevant practices in data.guidance.practices.".to_string());
+    }
+    env.next_actions = actions;
+}
+
+fn path_change_operations(paths: &[String]) -> Vec<owox_core::DeliveryOperation> {
+    let mut out = Vec::new();
+    for path in paths {
+        if is_dependency_change_path(path) {
+            push_delivery_operation(&mut out, owox_core::DeliveryOperation::DependencyChange);
+        }
+        if path.starts_with(".owox/requirements/") {
+            push_delivery_operation(&mut out, owox_core::DeliveryOperation::RequirementChange);
+        }
+        if path.starts_with(".owox/skills/") {
+            push_delivery_operation(&mut out, owox_core::DeliveryOperation::SkillChange);
+        }
+        if path.starts_with(".owox/") && !path.starts_with(".owox/skills/") {
+            push_delivery_operation(&mut out, owox_core::DeliveryOperation::CanonChange);
+        }
+    }
+    out
+}
+
+fn is_dependency_change_path(path: &str) -> bool {
+    matches!(
+        path,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "go.mod"
+            | "go.sum"
+    )
+}
+
+fn push_delivery_operation(
+    items: &mut Vec<owox_core::DeliveryOperation>,
+    item: owox_core::DeliveryOperation,
+) {
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
 /// verify.run の封筒から検査の総合判定と失敗検査名を取り出す。commit ゲートが作業ツリー同一時に
 /// 検査結果を再利用するための記録を組む。data が無い・形が想定外なら needs_human (検査未設定扱い)
 /// に倒し、再利用させず commit ゲートに検査を走らせる (安全側)。
@@ -2227,11 +2348,17 @@ fn find_owox_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ReferenceSummary {
     requirement_refs: usize,
     decision_refs: usize,
     broken_refs: usize,
+}
+
+#[derive(Clone)]
+struct ReferenceScan {
+    summary: ReferenceSummary,
+    broken: Vec<String>,
 }
 
 struct DiffContextData {
@@ -2241,6 +2368,7 @@ struct DiffContextData {
     reference_summary: ReferenceSummary,
     review_hints: Vec<String>,
     needs_codebase: bool,
+    guidance: owox_core::DeliverySelection,
 }
 
 fn render_diff_context(
@@ -2265,8 +2393,14 @@ fn build_diff_context(repo_root: &Path, owox_dir: &Path) -> Result<DiffContextDa
     let decisions = list_decisions(owox_dir)
         .map_err(|err| McpError::internal_error(format!("来歴を読めない: {err}"), None))?;
     let reference_summary =
-        summarize_references(repo_root, &changed_files, &requirements, &decisions);
+        scan_references(repo_root, &changed_files, &requirements, &decisions).summary;
     let needs_codebase = needs_codebase_map(&changed_files);
+    let changed_paths: Vec<String> = changed_files.iter().map(|f| f.path.clone()).collect();
+    let guidance = owox_core::select_delivery(
+        owox_dir,
+        owox_core::DeliveryRequest::for_paths(&changed_paths),
+    )
+    .unwrap_or_default();
     let review_hints = diff_review_hints(
         &changed_files,
         &canon_changes,
@@ -2280,6 +2414,7 @@ fn build_diff_context(repo_root: &Path, owox_dir: &Path) -> Result<DiffContextDa
         reference_summary,
         review_hints,
         needs_codebase,
+        guidance,
     })
 }
 
@@ -2332,6 +2467,11 @@ fn render_diff_context_body(data: &DiffContextData, mission: crate::cache::Missi
         out.push_str(&format!("- {hint}\n"));
     }
     out.push('\n');
+
+    let guidance = owox_core::render_delivery_block(&data.guidance);
+    if !guidance.is_empty() {
+        out.push_str(&guidance);
+    }
 
     if data.needs_codebase {
         out.push_str("## Next\n\n");
@@ -2433,12 +2573,12 @@ enum ReferenceTarget {
     Decision { id: String },
 }
 
-fn summarize_references(
+fn scan_references(
     repo_root: &Path,
     changed_files: &[crate::files::ChangedFile],
     requirements: &[owox_core::Requirement],
     decisions: &[owox_core::Decision],
-) -> ReferenceSummary {
+) -> ReferenceScan {
     let requirement_map: BTreeMap<&str, BTreeSet<u32>> = requirements
         .iter()
         .map(|r| {
@@ -2450,6 +2590,7 @@ fn summarize_references(
         .collect();
     let decision_ids: BTreeSet<&str> = decisions.iter().map(|d| d.id.as_str()).collect();
     let mut summary = ReferenceSummary::default();
+    let mut broken = Vec::new();
     for file in changed_files {
         if file.status == crate::files::ChangeStatus::Deleted
             || file.kind == crate::files::FileKind::Generated
@@ -2469,21 +2610,29 @@ fn summarize_references(
                                 && !criteria.contains(&criterion)
                             {
                                 summary.broken_refs += 1;
+                                broken.push(format!(
+                                    "{} -> owox:req:{}#{}",
+                                    file.path, id, criterion
+                                ));
                             }
                         }
-                        None => summary.broken_refs += 1,
+                        None => {
+                            summary.broken_refs += 1;
+                            broken.push(format!("{} -> owox:req:{}", file.path, id));
+                        }
                     }
                 }
                 ReferenceTarget::Decision { id } => {
                     summary.decision_refs += 1;
                     if !decision_ids.contains(id.as_str()) {
                         summary.broken_refs += 1;
+                        broken.push(format!("{} -> owox:dec:{}", file.path, id));
                     }
                 }
             }
         }
     }
-    summary
+    ReferenceScan { summary, broken }
 }
 
 fn extract_references(text: &str) -> Vec<ReferenceTarget> {
@@ -3257,6 +3406,7 @@ mod tests {
             reference_summary: ReferenceSummary::default(),
             review_hints: vec!["h".to_string()],
             needs_codebase: true,
+            guidance: owox_core::DeliverySelection::default(),
         };
         let out = render_diff_context_body(&data, crate::cache::Mission::Work);
         assert!(out.contains("scope codebase"));
