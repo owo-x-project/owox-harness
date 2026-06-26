@@ -195,17 +195,20 @@ fn pre_tool_use() -> ExitCode {
         .as_ref()
         .and_then(|t| t.file_path.as_deref());
 
-    // 使用履歴: シェル操作・編集の tool 名を 1 行追記する (best-effort)。
+    // 使用履歴: 読み・編集・シェル操作を安全な分類で 1 行追記する (best-effort)。
     // 入口コマンド (MCP tool) は serve 側の call_tool で記録するのでここでは拾わない (二重計上回避)。
-    if matches!(
-        tool_name,
-        "Bash" | "apply_patch" | "Edit" | "Write" | "MultiEdit"
-    ) {
-        owox_core::usage::record(
-            &owox_dir(input.cwd.as_deref()),
-            &crate::clock::today_utc(),
-            tool_name,
-        );
+    let usage_dir = owox_dir(input.cwd.as_deref());
+    let today = crate::clock::today_utc();
+    if tool_name == "Bash" {
+        if let Some(command) = command {
+            owox_core::usage::record_shell(&usage_dir, &today, command);
+        } else {
+            owox_core::usage::record(&usage_dir, &today, "Bash");
+        }
+    } else if is_edit_tool(tool_name) {
+        owox_core::usage::record(&usage_dir, &today, "Edit");
+    } else if is_read_tool(tool_name) {
+        owox_core::usage::record(&usage_dir, &today, "Read");
     }
 
     // AI がファイルを編集した印を session へ残す。次の人間プロンプトで訂正検知 nudge の土台にする。

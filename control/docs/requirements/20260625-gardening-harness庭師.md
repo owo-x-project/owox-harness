@@ -42,6 +42,8 @@
 
 - 重複: 似た practices / 用語 / rules
 - 低利用: 使われない skill / 読まれない practice
+  - skill: 正本/入口本文で参照0、最終更新から30日超、更新後 repo 20 commit 以上
+  - practice: 新しい順の床予算外、追加から30日超、追加後 repo 20 commit 以上
 - 肥大: 床文脈がしきい値超え
 - 陳腐化: 古い knowledge / branch memory / open gate
 - 壊れ: skill 契約違反、参照切れ、生成物ずれ
@@ -94,7 +96,6 @@
 
 - `data.gardening` の項目構造
 - 各検出のしきい値
-- 低利用の測り方
 - 導線不良の測り方
 - 生成物ずれの対象範囲
 - どの違反を `failed` にするか

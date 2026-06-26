@@ -23,8 +23,6 @@
 - session 任務状態
 - `$kickoff` skill
 - `mission.start`
-- `mission.finish`
-- `mission.cancel`
 - `next`
 - `context`
 - `verify.run`
@@ -46,6 +44,18 @@
 `$kickoff` が `mission.start type="kickoff"` を呼ぶ。
 
 `SessionStart` や発話検知では開始しない。
+
+`mission.start` の返却:
+
+- `mission`
+- `next_preview`
+- kickoff 開始時だけ `data.kickoff`
+  - `unresolved`
+  - `ai_drafts`
+  - `human_decisions`
+  - `next_question`
+  - `ready_to_return`
+  - `canonicalization_candidates`
 
 ### session 任務
 
@@ -69,10 +79,9 @@ mission: kickoff
 
 ### 終了
 
-- `mission.finish`: 任務完了
-- `mission.cancel`: 任務中止
+`mission.start type="work"` で通常作業へ戻る。
 
-終了しない限り、任務適応は続く。
+切替しない限り、任務適応は続く。
 
 ### kickoff 中の挙動
 
@@ -96,6 +105,9 @@ mission: kickoff
 - 未決の残りを検査する
 - AI 仮決定の残りを検査する
 - 正本化前の抜けを検査する
+- kickoff 中は `data.kickoff` に戻る前まとめを返す
+  - `ready_to_return`
+  - `canonicalization_candidates`
 
 `profile.detect`:
 
@@ -204,7 +216,7 @@ AI が仮決定してよい場合:
    - AI 仮決定
    - 未決
    - 正本化候補
-   - `mission.finish` 可否
+   - `mission.start type="work"` へ戻してよいか
 
 ### 次の質問の優先順位
 
@@ -252,7 +264,7 @@ kickoff 中は原則書かない。
 - kickoff 中の `context` が判断材料を返す
 - kickoff 中の `verify.run` が未決と AI 仮決定を検査する
 - 任務状態が tool 出力に必ず出る
-- `mission.finish` / `mission.cancel` で通常挙動へ戻る
+- `mission.start type="work"` で通常挙動へ戻る
 - kickoff 中に自動正本書込しない
 
 ## 未決事項
@@ -260,5 +272,3 @@ kickoff 中は原則書かない。
 - 任務状態の保存場所
 - session をまたぐ任務継続の可否
 - `work` 任務を明示状態にするか、任務なしを通常扱いにするか
-- `mission.start` の返却形式
-- `mission.finish` 時の正本化候補のまとめ方

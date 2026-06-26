@@ -94,23 +94,10 @@ pub fn write_all(base: &Path, files: &[GeneratedFile]) -> Result<(), WriteError>
             })?;
         }
 
-        let contents = match file.write {
-            Write::Overwrite => file.contents.clone(),
-            Write::MergeToml => {
-                let existing = std::fs::read_to_string(&dest).unwrap_or_default();
-                merge_toml(&existing, &file.contents).map_err(|message| WriteError {
-                    path: dest.clone(),
-                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
-                })?
-            }
-            Write::MergeJson => {
-                let existing = std::fs::read_to_string(&dest).unwrap_or_default();
-                merge_json(&existing, &file.contents).map_err(|message| WriteError {
-                    path: dest.clone(),
-                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
-                })?
-            }
-        };
+        let contents = render_generated_file(&dest, file).map_err(|message| WriteError {
+            path: dest.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+        })?;
 
         std::fs::write(&dest, &contents).map_err(|source| WriteError {
             path: dest.clone(),
@@ -121,6 +108,21 @@ pub fn write_all(base: &Path, files: &[GeneratedFile]) -> Result<(), WriteError>
         }
     }
     Ok(())
+}
+
+/// 既存ファイルに対して generated file を適用したらどうなるかを返す。書き込みはしない。
+pub fn render_generated_file(dest: &Path, file: &GeneratedFile) -> Result<String, String> {
+    match file.write {
+        Write::Overwrite => Ok(file.contents.clone()),
+        Write::MergeToml => {
+            let existing = std::fs::read_to_string(dest).unwrap_or_default();
+            merge_toml(&existing, &file.contents)
+        }
+        Write::MergeJson => {
+            let existing = std::fs::read_to_string(dest).unwrap_or_default();
+            merge_json(&existing, &file.contents)
+        }
+    }
 }
 
 /// 既存 TOML へ owox 管理ブロック (断片) をマージする。

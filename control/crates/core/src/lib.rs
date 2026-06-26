@@ -100,13 +100,15 @@ pub use requirement::{
     list_requirements_envelope, update_requirement,
 };
 pub use review::{Applicability, Lens, load_lenses, review_lenses_envelope, select_lenses};
-pub use routine::{RoutineSuggestion, run_routine_suggestions};
+pub use routine::{RoutineKind, RoutineSuggestion, run_routine_suggestions};
 pub use skill::{
     ScriptFile, Skill, SkillStatus, Stage, TestState, list_skills_envelope, load_skills,
     promote_skill, register_skill, registered_skills, remember, run_skill_tests, skill_status,
 };
 pub use state::set_state;
-pub use target::{GeneratedFile, Target, Write, WriteError, find, registry, write_all};
+pub use target::{
+    GeneratedFile, Target, Write, WriteError, find, registry, render_generated_file, write_all,
+};
 pub use task::{
     CreateTaskInput, Dep, DepKind, ExternalRef, Task, TaskLinks, TaskStatus, UpdateTaskInput,
     add_note, close_task, create_task, drop_task, is_ready, link_task, list_tasks,

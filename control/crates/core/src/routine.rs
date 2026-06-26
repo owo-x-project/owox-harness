@@ -13,6 +13,22 @@ use crate::quality::RoutineConfig;
 use crate::skill::Skill;
 use crate::usage;
 
+/// 提案種別。script に落としやすいものだけ `ScriptSkill` へ上げる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineKind {
+    Skill,
+    ScriptSkill,
+}
+
+impl RoutineKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoutineKind::Skill => "skill",
+            RoutineKind::ScriptSkill => "script-skill",
+        }
+    }
+}
+
 /// 育てられる手順の提案 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineSuggestion {
@@ -20,6 +36,14 @@ pub struct RoutineSuggestion {
     pub sequence: Vec<String>,
     /// 出現回数。
     pub occurrences: usize,
+    /// 通常 skill か、script に寄せやすいか。
+    pub kind: RoutineKind,
+    /// 判定理由。
+    pub reasons: Vec<String>,
+    /// script-skill 候補の保存先の叩き台。
+    pub suggested_script: Option<String>,
+    /// 最低限の試験の置き場所の叩き台。
+    pub test_hint: Option<String>,
 }
 
 /// 使用履歴から頻出手順を検知する。閾値超え かつ 未スキル化 の列を返す。
@@ -49,10 +73,7 @@ pub fn run_routine_suggestions(
     let mut candidates: Vec<RoutineSuggestion> = counts
         .into_iter()
         .filter(|(seq, n)| *n as u32 >= config.min_occurrences && has_distinct_steps(seq))
-        .map(|(sequence, occurrences)| RoutineSuggestion {
-            sequence,
-            occurrences,
-        })
+        .map(|(sequence, occurrences)| build_suggestion(sequence, occurrences))
         .collect();
     candidates.sort_by(|a, b| {
         b.sequence
@@ -78,6 +99,98 @@ pub fn run_routine_suggestions(
         kept.push(c);
     }
     kept
+}
+
+fn build_suggestion(sequence: Vec<String>, occurrences: usize) -> RoutineSuggestion {
+    let mut reasons = vec![format!("repeated {occurrences} times")];
+    let scriptable = is_script_skill_candidate(&sequence, &mut reasons);
+    let slug = slugify_seq(&sequence);
+    RoutineSuggestion {
+        suggested_script: scriptable.then(|| format!("scripts/{slug}.sh")),
+        test_hint: scriptable.then(|| format!("tests/{slug}.sh with fixture files")),
+        kind: if scriptable {
+            RoutineKind::ScriptSkill
+        } else {
+            reasons.push(
+                "kept as a normal skill suggestion because the steps are not all safely scriptable"
+                    .to_string(),
+            );
+            RoutineKind::Skill
+        },
+        reasons,
+        sequence,
+        occurrences,
+    }
+}
+
+fn is_script_skill_candidate(sequence: &[String], reasons: &mut Vec<String>) -> bool {
+    if !sequence.iter().all(|step| is_repo_local_step(step)) {
+        return false;
+    }
+    if !sequence.iter().all(|step| is_deterministic_step(step)) {
+        return false;
+    }
+    if !sequence.iter().any(|step| has_exit_code_signal(step)) {
+        return false;
+    }
+    if !sequence.iter().any(|step| is_strong_script_signal(step)) {
+        return false;
+    }
+    reasons.push("steps are repo-local and deterministic".to_string());
+    reasons.push("the sequence includes a command whose exit code can express failure".to_string());
+    reasons.push("the core steps match the safe script vocabulary".to_string());
+    true
+}
+
+fn is_repo_local_step(step: &str) -> bool {
+    matches!(
+        step,
+        "Read"
+            | "Edit"
+            | "Bash:rg"
+            | "Bash:sed"
+            | "Bash:awk"
+            | "Bash:jq"
+            | "Bash:yq"
+            | "Bash:cargo-test"
+            | "Bash:npm-test"
+            | "Bash:pytest"
+            | "Bash:git-diff"
+    )
+}
+
+fn is_deterministic_step(step: &str) -> bool {
+    is_repo_local_step(step)
+}
+
+fn has_exit_code_signal(step: &str) -> bool {
+    matches!(
+        step,
+        "Bash:rg"
+            | "Bash:sed"
+            | "Bash:awk"
+            | "Bash:jq"
+            | "Bash:yq"
+            | "Bash:cargo-test"
+            | "Bash:npm-test"
+            | "Bash:pytest"
+            | "Bash:git-diff"
+    )
+}
+
+fn is_strong_script_signal(step: &str) -> bool {
+    matches!(
+        step,
+        "Bash:rg"
+            | "Bash:sed"
+            | "Bash:awk"
+            | "Bash:jq"
+            | "Bash:yq"
+            | "Bash:cargo-test"
+            | "Bash:npm-test"
+            | "Bash:pytest"
+            | "Bash:git-diff"
+    )
 }
 
 /// 手順として意味があるか = 異なる name を 2 種以上含むか。
@@ -192,6 +305,7 @@ mod tests {
         let s = run_routine_suggestions(&dir, &cfg(), &[]);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].sequence, vec!["a", "b", "c"]);
+        assert_eq!(s[0].kind, RoutineKind::Skill);
     }
 
     #[test]
@@ -242,6 +356,24 @@ mod tests {
         // どの提案も distinct >= 2 (Bash 単独連打は出ない)。
         assert!(!s.is_empty());
         assert!(s.iter().all(|r| has_distinct_steps(&r.sequence)));
+    }
+
+    #[test]
+    fn safe_shell_vocab_promotes_to_script_skill() {
+        let dir = tempdir();
+        seed(
+            &dir,
+            &[
+                "Read", "Bash:rg", "Bash:sed", "Read", "Bash:rg", "Bash:sed", "Read", "Bash:rg",
+                "Bash:sed",
+            ],
+        );
+        let s = run_routine_suggestions(&dir, &cfg(), &[]);
+        assert!(s.iter().any(|r| {
+            r.kind == RoutineKind::ScriptSkill
+                && r.suggested_script.as_deref() == Some("scripts/read-bash-rg-bash-sed.sh")
+                && !r.reasons.is_empty()
+        }));
     }
 
     #[test]

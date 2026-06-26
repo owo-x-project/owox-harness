@@ -179,17 +179,11 @@ pub fn set_current_mission(owox_dir: &Path, mission: Mission) -> Result<(), Stri
         "現在 session を特定できない。session-start hook 後に再試行すること。".to_string()
     })?;
     let mut map = read_mission_map(owox_dir);
-    map.insert(session_id, mission);
-    write_mission_map(owox_dir, &map)
-}
-
-/// 現在 session の任務を終える。未設定ならそのまま。
-pub fn clear_current_mission(owox_dir: &Path) -> Result<(), String> {
-    let Some(session_id) = current_session_id(owox_dir) else {
-        return Ok(());
-    };
-    let mut map = read_mission_map(owox_dir);
-    map.remove(&session_id);
+    if mission == Mission::Work {
+        map.remove(&session_id);
+    } else {
+        map.insert(session_id, mission);
+    }
     write_mission_map(owox_dir, &map)
 }
 

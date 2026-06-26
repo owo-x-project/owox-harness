@@ -696,13 +696,7 @@ impl OwoxServer {
 
     /// 逆生成シグナル (DetectSignals) の素材。profile.detect / canon.detect / kickoff で共用する。
     fn detect_inputs(&self) -> (Vec<String>, bool, bool) {
-        let work_dir = self.repo_root();
-        let files = crate::files::list_repo_files(work_dir);
-        let has_quality_layers = owox_core::load_canon(&self.owox_dir)
-            .map(|c| !c.quality.layers.is_empty() || !c.quality.boundaries.is_empty())
-            .unwrap_or(false);
-        let has_version_tags = git_has_version_tags(work_dir);
-        (files, has_quality_layers, has_version_tags)
+        detect_inputs(self.repo_root(), &self.owox_dir)
     }
 
     /// 性質が宣言済みか (profile.toml が実在)。未宣言なら kickoff が profile.detect 案を能動返却する。
@@ -852,7 +846,7 @@ impl OwoxServer {
     /// 現在 session の任務を開始する。kickoff などの間、tool の返り方を任務向けへ寄せる。
     #[tool(
         name = "mission.start",
-        description = "Start a session mission: work, kickoff, review, verify, or handoff. This changes how mission-aware tools report until mission.finish or mission.cancel."
+        description = "Set the current session mission: work, kickoff, review, verify, or handoff. This changes how mission-aware tools report until another mission is set."
     )]
     async fn mission_start(
         &self,
@@ -865,39 +859,37 @@ impl OwoxServer {
         if let Err(err) = crate::cache::set_current_mission(&self.owox_dir, mission) {
             return self.envelope_result(Envelope::failed(err));
         }
+        let preview = mission_preview(&self.owox_dir, self.repo_root(), mission);
+        let mut data = serde_json::json!({ "mission": mission.as_str() });
+        if let Some(obj) = data.as_object_mut() {
+            if let Some(preview) = preview {
+                obj.insert("next_preview".to_string(), serde_json::json!(preview));
+            }
+        }
+        if mission == crate::cache::Mission::Kickoff
+            && let Ok(canon) = owox_core::load_canon(&self.owox_dir)
+        {
+            let decisions = list_decisions(&self.owox_dir)
+                .map_err(|err| McpError::internal_error(format!("来歴を読めない: {err}"), None))?;
+            let tasks = list_tasks(&self.owox_dir).map_err(|err| {
+                McpError::internal_error(format!("タスクを読めない: {err}"), None)
+            })?;
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert(
+                    "kickoff".to_string(),
+                    kickoff_status_json(
+                        &self.owox_dir,
+                        self.repo_root(),
+                        &canon,
+                        &decisions,
+                        &tasks,
+                    ),
+                );
+            }
+        }
         self.envelope_result(Envelope::ok(
             format!("Session mission set to {}.", mission.as_str()),
-            serde_json::json!({ "mission": mission.as_str() }),
-        ))
-    }
-
-    /// 現在 session の任務を完了し、通常 `work` へ戻す。
-    #[tool(
-        name = "mission.finish",
-        description = "Finish the current session mission and return to work mode."
-    )]
-    async fn mission_finish(&self) -> Result<CallToolResult, McpError> {
-        if let Err(err) = crate::cache::clear_current_mission(&self.owox_dir) {
-            return self.envelope_result(Envelope::failed(err));
-        }
-        self.envelope_result(Envelope::ok(
-            "Session mission finished. Back to work mode.",
-            serde_json::json!({ "mission": "work" }),
-        ))
-    }
-
-    /// 現在 session の任務を中止し、通常 `work` へ戻す。
-    #[tool(
-        name = "mission.cancel",
-        description = "Cancel the current session mission and return to work mode."
-    )]
-    async fn mission_cancel(&self) -> Result<CallToolResult, McpError> {
-        if let Err(err) = crate::cache::clear_current_mission(&self.owox_dir) {
-            return self.envelope_result(Envelope::failed(err));
-        }
-        self.envelope_result(Envelope::ok(
-            "Session mission cancelled. Back to work mode.",
-            serde_json::json!({ "mission": "work" }),
+            data,
         ))
     }
 
@@ -918,7 +910,23 @@ impl OwoxServer {
                 let canon = owox_core::load_canon(&self.owox_dir).map_err(|err| {
                     McpError::internal_error(format!("正本を読めない: {err}"), None)
                 })?;
-                render_context(&canon.context)
+                if self.mission() == crate::cache::Mission::Kickoff {
+                    let decisions = list_decisions(&self.owox_dir).map_err(|err| {
+                        McpError::internal_error(format!("来歴を読めない: {err}"), None)
+                    })?;
+                    let tasks = list_tasks(&self.owox_dir).map_err(|err| {
+                        McpError::internal_error(format!("タスクを読めない: {err}"), None)
+                    })?;
+                    render_kickoff_context(
+                        self.repo_root(),
+                        &self.owox_dir,
+                        &canon,
+                        &decisions,
+                        &tasks,
+                    )
+                } else {
+                    render_context(&canon.context)
+                }
             }
             Some("diff") => render_diff_context(self.repo_root(), &self.owox_dir, self.mission())?,
             Some("codebase") => {
@@ -945,9 +953,19 @@ impl OwoxServer {
             .map_err(|err| McpError::internal_error(format!("タスクを読めない: {err}"), None))?;
         let requirements = list_requirements(&self.owox_dir)
             .map_err(|err| McpError::internal_error(format!("要件を読めない: {err}"), None))?;
+        let repo_root = self.repo_root();
+        let canon = owox_core::load_canon(&self.owox_dir).ok();
+        if self.mission() == crate::cache::Mission::Kickoff
+            && let Some(canon) = canon.as_ref()
+        {
+            let questions =
+                build_kickoff_questions(&self.owox_dir, repo_root, canon, &decisions, &tasks);
+            return Ok(self.text_result(render_kickoff_next(&questions)));
+        }
         // 腐敗検知の閾値は quality.toml の [decay]。正本が読めない時は警告を出さない (作業を妨げない)。
         // 成長層 (practices) の鮮度も合流する (canon 内で軽い・next の高速性を崩さない)。
-        let decay = owox_core::load_canon(&self.owox_dir)
+        let decay = canon
+            .as_ref()
             .map(|canon| {
                 let mut d = run_decay(&tasks, &decisions, &canon.quality.decay, &today_utc());
                 d.extend(owox_core::run_practice_decay(
@@ -982,9 +1000,16 @@ impl OwoxServer {
             .unwrap_or_default();
         // 育てられる手順 (頻出する隣接 tool / コマンド列) を助言する。usage.log + skills を読む (軽量)。
         let skills = owox_core::load_skills(&self.owox_dir).unwrap_or_default();
-        let routines = owox_core::load_canon(&self.owox_dir)
+        let routines = canon
+            .as_ref()
             .map(|canon| {
                 owox_core::run_routine_suggestions(&self.owox_dir, &canon.quality.routine, &skills)
+            })
+            .unwrap_or_default();
+        let gardening = canon
+            .as_ref()
+            .map(|canon| {
+                build_gardening_findings(&self.owox_dir, repo_root, &canon, &decay, None, false)
             })
             .unwrap_or_default();
         // 性質軸を解決する (profile.toml)。読めない/解決失敗時はフル方法論既定で振る舞う。
@@ -997,6 +1022,7 @@ impl OwoxServer {
             &requirements,
             &decay,
             &routines,
+            &gardening,
             axes,
             auto,
             self.mission(),
@@ -1416,14 +1442,52 @@ impl OwoxServer {
                 "broken": refs.broken,
             }),
         );
-        if refs.summary.broken_refs > 0 {
-            env.status = owox_core::Status::Failed;
-            env.reason = "Broken owox references found.".to_string();
-            let mut next = env.next_actions.clone();
-            next.insert(
-                0,
-                "Fix the broken references listed in data.references.broken.".to_string(),
+        if self.mission() == crate::cache::Mission::Kickoff {
+            merge_data(
+                &mut env,
+                "kickoff",
+                kickoff_status_json(&self.owox_dir, work_dir, &canon, &decisions, &tasks),
             );
+            let questions =
+                build_kickoff_questions(&self.owox_dir, work_dir, &canon, &decisions, &tasks);
+            if !questions.is_empty() {
+                let mut next = env.next_actions.clone();
+                next.insert(
+                    0,
+                    "Kickoff mission is still open. Resolve the next setup decision shown by next."
+                        .to_string(),
+                );
+                env.next_actions = next;
+            }
+        }
+        let gardening =
+            build_gardening_findings(&self.owox_dir, work_dir, &canon, &decay, Some(&refs), true);
+        if !gardening.is_empty() {
+            merge_data(&mut env, "gardening", gardening_json(&gardening));
+        }
+        if refs.summary.broken_refs > 0 || gardening.iter().any(|f| f.severity == "failed") {
+            env.status = owox_core::Status::Failed;
+            env.reason = "Gardening found broken harness state.".to_string();
+            let mut next = env.next_actions.clone();
+            if refs.summary.broken_refs > 0 {
+                next.insert(
+                    0,
+                    "Fix the broken references listed in data.references.broken.".to_string(),
+                );
+            }
+            if gardening.iter().any(|f| f.kind == "broken-skill") {
+                next.insert(
+                    0,
+                    "Fix the broken skills listed in data.gardening.findings.".to_string(),
+                );
+            }
+            if gardening.iter().any(|f| f.kind == "generated-edit") {
+                next.insert(
+                    0,
+                    "Revert direct edits to generated files and change the source instead."
+                        .to_string(),
+                );
+            }
             env.next_actions = next;
         }
         // 今走らせた作業ツリーの署名と検査結果を覚える。Stop は署名一致で「verify.run 済み・以降
@@ -1447,11 +1511,22 @@ impl OwoxServer {
         if !routines.is_empty() {
             let items: Vec<serde_json::Value> = routines
                 .iter()
-                .map(
-                    |r| serde_json::json!({ "sequence": r.sequence, "occurrences": r.occurrences }),
-                )
+                .map(|r| {
+                    serde_json::json!({
+                        "sequence": r.sequence,
+                        "occurrences": r.occurrences,
+                        "kind": r.kind.as_str(),
+                        "reasons": r.reasons,
+                        "suggested_script": r.suggested_script,
+                        "test_hint": r.test_hint,
+                    })
+                })
                 .collect();
-            merge_data(&mut env, "routines", serde_json::Value::Array(items));
+            merge_data(
+                &mut env,
+                "routine_suggestions",
+                serde_json::Value::Array(items),
+            );
         }
         self.envelope_result(env)
     }
@@ -2361,12 +2436,31 @@ struct ReferenceScan {
     broken: Vec<String>,
 }
 
+#[derive(Clone)]
+struct GardeningFinding {
+    kind: String,
+    severity: &'static str,
+    subject: String,
+    detail: String,
+}
+
+#[derive(Clone)]
+struct KickoffQuestion {
+    stage: &'static str,
+    item: String,
+    recommendation: String,
+    reason: String,
+    decider: &'static str,
+    options: Vec<String>,
+}
+
 struct DiffContextData {
     base: crate::files::DiffBase,
     changed_files: Vec<crate::files::ChangedFile>,
     canon_changes: Vec<crate::files::ChangedFile>,
     reference_summary: ReferenceSummary,
     review_hints: Vec<String>,
+    gardening_hints: Vec<String>,
     needs_codebase: bool,
     guidance: owox_core::DeliverySelection,
 }
@@ -2407,12 +2501,25 @@ fn build_diff_context(repo_root: &Path, owox_dir: &Path) -> Result<DiffContextDa
         &reference_summary,
         needs_codebase,
     );
+    let gardening_hints = owox_core::load_canon(owox_dir)
+        .map(|canon| {
+            let refs = scan_references(repo_root, &changed_files, &requirements, &decisions);
+            build_gardening_findings(owox_dir, repo_root, &canon, &[], Some(&refs), false)
+                .into_iter()
+                .take(6)
+                .map(|finding| {
+                    format!("{} [{}]: {}", finding.subject, finding.kind, finding.detail)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(DiffContextData {
         base,
         changed_files,
         canon_changes,
         reference_summary,
         review_hints,
+        gardening_hints,
         needs_codebase,
         guidance,
     })
@@ -2467,6 +2574,13 @@ fn render_diff_context_body(data: &DiffContextData, mission: crate::cache::Missi
         out.push_str(&format!("- {hint}\n"));
     }
     out.push('\n');
+    if !data.gardening_hints.is_empty() {
+        out.push_str("## Gardening hints\n\n");
+        for hint in &data.gardening_hints {
+            out.push_str(&format!("- {hint}\n"));
+        }
+        out.push('\n');
+    }
 
     let guidance = owox_core::render_delivery_block(&data.guidance);
     if !guidance.is_empty() {
@@ -2685,6 +2799,18 @@ fn short_id(value: &str) -> &str {
     value.get(..8).unwrap_or(value)
 }
 
+const CODEBASE_INDEX_STALE_DAYS: i64 = 7;
+const GARDENING_FLOOR_BLOAT_TOKENS: usize = 3000;
+const GARDENING_LOW_USE_DAYS: i64 = 30;
+const GARDENING_LOW_USE_COMMITS: usize = 20;
+
+#[derive(Clone, Default)]
+struct CodebaseCacheStatus {
+    stale: bool,
+    refreshed: bool,
+    reasons: Vec<String>,
+}
+
 fn repo_area_key(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
@@ -2707,16 +2833,49 @@ fn render_codebase_context(
     mission: crate::cache::Mission,
 ) -> Result<String, McpError> {
     let head = crate::files::current_git_head(repo_root);
-    let index = match crate::cache::read_codebase_index(owox_dir) {
-        Some(index) if index.git_head == head => index,
-        _ => {
+    let today = today_utc();
+    let (index, cache) = match crate::cache::read_codebase_index(owox_dir) {
+        Some(index) => {
+            let reasons = codebase_stale_reasons(repo_root, &index, head.as_deref(), &today);
+            if reasons.is_empty() {
+                (
+                    index,
+                    CodebaseCacheStatus {
+                        stale: false,
+                        refreshed: false,
+                        reasons: Vec::new(),
+                    },
+                )
+            } else {
+                let index = build_codebase_index(repo_root, head.clone());
+                let _ = crate::cache::write_codebase_index(owox_dir, &index);
+                (
+                    index,
+                    CodebaseCacheStatus {
+                        stale: false,
+                        refreshed: true,
+                        reasons,
+                    },
+                )
+            }
+        }
+        None => {
             let index = build_codebase_index(repo_root, head.clone());
             let _ = crate::cache::write_codebase_index(owox_dir, &index);
-            index
+            (
+                index,
+                CodebaseCacheStatus {
+                    stale: false,
+                    refreshed: true,
+                    reasons: vec!["cache missing".to_string()],
+                },
+            )
         }
     };
     let related = current_diff_paths(repo_root);
-    Ok(render_codebase_context_body(&index, &related, mission))
+    Ok(render_codebase_context_body(
+        &index, &related, mission, &cache,
+    ))
 }
 
 fn build_codebase_index(repo_root: &Path, git_head: Option<String>) -> crate::cache::CodebaseIndex {
@@ -2919,10 +3078,543 @@ fn current_diff_paths(repo_root: &Path) -> Vec<String> {
         .collect()
 }
 
+fn detect_inputs(repo_root: &Path, owox_dir: &Path) -> (Vec<String>, bool, bool) {
+    let files = crate::files::list_repo_files(repo_root);
+    let has_quality_layers = owox_core::load_canon(owox_dir)
+        .map(|c| !c.quality.layers.is_empty() || !c.quality.boundaries.is_empty())
+        .unwrap_or(false);
+    let has_version_tags = git_has_version_tags(repo_root);
+    (files, has_quality_layers, has_version_tags)
+}
+
+fn codebase_stale_reasons(
+    repo_root: &Path,
+    index: &crate::cache::CodebaseIndex,
+    current_head: Option<&str>,
+    today: &str,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if index.git_head.as_deref() != current_head {
+        reasons.push("git head changed".to_string());
+    }
+    for path in &index.source_files {
+        if !repo_root.join(path).exists() {
+            reasons.push(format!("evidence file missing: {path}"));
+        }
+    }
+    let changed: BTreeSet<String> = crate::files::changed_files(repo_root).into_iter().collect();
+    for path in &index.source_files {
+        if changed.contains(path) {
+            reasons.push(format!("evidence file changed: {path}"));
+        }
+    }
+    if let (Some(today_days), Some(generated_days)) =
+        (ymd_to_days(today), ymd_to_days(&index.generated_on))
+    {
+        let age = today_days - generated_days;
+        if age > CODEBASE_INDEX_STALE_DAYS {
+            reasons.push(format!(
+                "cache age {age} days exceeds {CODEBASE_INDEX_STALE_DAYS} days"
+            ));
+        }
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+fn ymd_to_days(s: &str) -> Option<i64> {
+    if s.len() != 8 || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let y = s[0..4].parse::<i64>().ok()?;
+    let m = s[4..6].parse::<u32>().ok()?;
+    let d = s[6..8].parse::<u32>().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(days_from_civil(y, m, d))
+}
+
+fn build_gardening_findings(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+    decay: &[DecayFinding],
+    refs: Option<&ReferenceScan>,
+    include_skills: bool,
+) -> Vec<GardeningFinding> {
+    let mut findings = Vec::new();
+    findings.extend(glossary_duplicate_findings(&canon.glossary));
+    findings.extend(decay_gardening_findings(decay));
+    findings.extend(low_use_findings(owox_dir, repo_root, canon, &today_utc()));
+    findings.extend(floor_bloat_findings(canon));
+    findings.extend(generated_edit_findings(repo_root));
+    findings.extend(generated_drift_findings(owox_dir, repo_root, canon));
+    findings.extend(command_routing_findings(owox_dir));
+    if include_skills {
+        findings.extend(skill_gardening_findings(owox_dir, repo_root));
+    }
+    if let Some(refs) = refs {
+        findings.extend(reference_gardening_findings(refs));
+        findings.extend(untraced_canon_change_findings(repo_root, refs));
+    }
+    findings.sort_by(|a, b| {
+        (b.severity == "failed")
+            .cmp(&(a.severity == "failed"))
+            .then(a.kind.cmp(&b.kind))
+            .then(a.subject.cmp(&b.subject))
+    });
+    findings
+}
+
+fn glossary_duplicate_findings(glossary: &owox_core::Glossary) -> Vec<GardeningFinding> {
+    let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in &glossary.entries {
+        seen.entry(entry.term.to_lowercase())
+            .or_default()
+            .push(entry.term.clone());
+        for alias in &entry.aliases {
+            seen.entry(alias.to_lowercase())
+                .or_default()
+                .push(format!("{} (alias)", entry.term));
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, owners)| owners.len() > 1)
+        .map(|(name, owners)| GardeningFinding {
+            kind: "duplicate-glossary".to_string(),
+            severity: "advisory",
+            subject: name,
+            detail: format!("reused by {}", owners.join(", ")),
+        })
+        .collect()
+}
+
+fn decay_gardening_findings(decay: &[DecayFinding]) -> Vec<GardeningFinding> {
+    decay
+        .iter()
+        .filter_map(|finding| {
+            let kind = match finding.kind {
+                "redundant-practice" => "duplicate-practice",
+                "stale-practice"
+                | "stale-knowledge"
+                | "stale-branch-memory"
+                | "stale-open-decision"
+                | "review-decision" => finding.kind,
+                _ => return None,
+            };
+            Some(GardeningFinding {
+                kind: kind.to_string(),
+                severity: "advisory",
+                subject: finding.subject.clone(),
+                detail: finding.detail.clone(),
+            })
+        })
+        .collect()
+}
+
+fn low_use_findings(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+    today: &str,
+) -> Vec<GardeningFinding> {
+    let mut findings = low_use_skill_findings(owox_dir, repo_root, today);
+    findings.extend(low_use_practice_findings(repo_root, canon, today));
+    findings
+}
+
+fn low_use_skill_findings(owox_dir: &Path, repo_root: &Path, today: &str) -> Vec<GardeningFinding> {
+    let skills = owox_core::load_skills(owox_dir).unwrap_or_default();
+    if skills.is_empty() {
+        return Vec::new();
+    }
+    let corpus = gardening_search_corpus(owox_dir);
+    skills
+        .into_iter()
+        .filter_map(|skill| {
+            if skill_is_referenced(&corpus, &skill) {
+                return None;
+            }
+            let rel = Path::new(".owox").join("skills").join(&skill.id);
+            let (updated_on, commits_since) = git_path_activity(repo_root, &rel)?;
+            let age = age_days(today, &updated_on)?;
+            if age <= GARDENING_LOW_USE_DAYS || commits_since < GARDENING_LOW_USE_COMMITS {
+                return None;
+            }
+            Some(GardeningFinding {
+                kind: "low-use".to_string(),
+                severity: "advisory",
+                subject: format!("skill {}", skill.id),
+                detail: format!(
+                    "unreferenced in canon or entry text for {age} days, with {commits_since} repo commits since its last update"
+                ),
+            })
+        })
+        .collect()
+}
+
+fn low_use_practice_findings(
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+    today: &str,
+) -> Vec<GardeningFinding> {
+    let floor_max = canon.settings.context.practices_floor_max;
+    if canon.practices.entries.len() <= floor_max {
+        return Vec::new();
+    }
+    let mut practices = canon.practices.entries.clone();
+    practices.sort_by(|a, b| b.date.cmp(&a.date));
+    practices
+        .into_iter()
+        .skip(floor_max)
+        .filter_map(|practice| {
+            let age = age_days(today, &practice.date)?;
+            let commits_since = git_commit_count_since_date(repo_root, &practice.date)?;
+            if age <= GARDENING_LOW_USE_DAYS || commits_since < GARDENING_LOW_USE_COMMITS {
+                return None;
+            }
+            Some(GardeningFinding {
+                kind: "low-use".to_string(),
+                severity: "advisory",
+                subject: format!("practice {}", practice.date),
+                detail: format!(
+                    "outside the freshest {floor_max} practices for {age} days, with {commits_since} repo commits since it was added"
+                ),
+            })
+        })
+        .collect()
+}
+
+fn floor_bloat_findings(canon: &owox_core::Canon) -> Vec<GardeningFinding> {
+    let floor = owox_core::floor_context(canon);
+    let tokens = owox_core::tokens::estimate_tokens(&floor);
+    if tokens <= GARDENING_FLOOR_BLOAT_TOKENS {
+        return Vec::new();
+    }
+    vec![GardeningFinding {
+        kind: "floor-bloat".to_string(),
+        severity: "advisory",
+        subject: "SessionStart".to_string(),
+        detail: format!(
+            "floor context is about {tokens} tokens; threshold is {GARDENING_FLOOR_BLOAT_TOKENS}"
+        ),
+    }]
+}
+
+fn generated_edit_findings(repo_root: &Path) -> Vec<GardeningFinding> {
+    crate::files::changed_files_since(repo_root, &crate::files::main_merge_base(repo_root).rev)
+        .into_iter()
+        .filter(|file| file.kind == crate::files::FileKind::Generated)
+        .map(|file| GardeningFinding {
+            kind: "generated-edit".to_string(),
+            severity: "failed",
+            subject: file.path,
+            detail: "generated or external output changed directly".to_string(),
+        })
+        .collect()
+}
+
+fn generated_drift_findings(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+) -> Vec<GardeningFinding> {
+    let mut findings = Vec::new();
+    for (dest, file) in expected_generated_files(owox_dir, repo_root, canon) {
+        if !dest.exists() {
+            continue;
+        }
+        let Ok(expected) = owox_core::render_generated_file(&dest, &file) else {
+            continue;
+        };
+        let actual = std::fs::read_to_string(&dest).unwrap_or_default();
+        if actual != expected {
+            findings.push(GardeningFinding {
+                kind: "generated-drift".to_string(),
+                severity: "failed",
+                subject: file.path,
+                detail: "generated file differs from what the current canon would render"
+                    .to_string(),
+            });
+            continue;
+        }
+        if file.executable && !file_is_executable(&dest) {
+            findings.push(GardeningFinding {
+                kind: "generated-drift".to_string(),
+                severity: "failed",
+                subject: file.path,
+                detail: "generated file is expected to be executable".to_string(),
+            });
+        }
+    }
+    findings
+}
+
+fn skill_gardening_findings(owox_dir: &Path, repo_root: &Path) -> Vec<GardeningFinding> {
+    let skills = owox_core::load_skills(owox_dir).unwrap_or_default();
+    let mut findings = Vec::new();
+    for skill in skills {
+        let status = owox_core::skill_status(&skill, repo_root);
+        if let Some(problem) = status.problem {
+            findings.push(GardeningFinding {
+                kind: "broken-skill".to_string(),
+                severity: "failed",
+                subject: status.id,
+                detail: problem,
+            });
+        } else if status.tests == owox_core::TestState::Failing {
+            findings.push(GardeningFinding {
+                kind: "broken-skill".to_string(),
+                severity: "failed",
+                subject: status.id,
+                detail: "skill tests are failing".to_string(),
+            });
+        }
+    }
+    findings
+}
+
+fn reference_gardening_findings(refs: &ReferenceScan) -> Vec<GardeningFinding> {
+    refs.broken
+        .iter()
+        .map(|broken| GardeningFinding {
+            kind: "broken-reference".to_string(),
+            severity: "failed",
+            subject: broken.clone(),
+            detail: "broken owox reference".to_string(),
+        })
+        .collect()
+}
+
+fn command_routing_findings(owox_dir: &Path) -> Vec<GardeningFinding> {
+    let commands = match owox_core::load_commands(owox_dir) {
+        Ok(commands) => commands,
+        Err(_) => return Vec::new(),
+    };
+    let expected: &[(&str, &[&str])] = &[
+        ("kickoff", &["mission.start", "next"]),
+        ("next", &["next", "context"]),
+        ("status", &["next", "gate.list"]),
+        ("verify", &["verify.run"]),
+        ("review", &["review.lenses", "verify.run", "context"]),
+        ("skill", &["skill.list"]),
+    ];
+    let mut findings = Vec::new();
+    for (name, required) in expected {
+        let Some(command) = commands.iter().find(|command| command.name == *name) else {
+            findings.push(GardeningFinding {
+                kind: "entry-routing".to_string(),
+                severity: "advisory",
+                subject: (*name).to_string(),
+                detail: "entry command is missing".to_string(),
+            });
+            continue;
+        };
+        let missing: Vec<&str> = required
+            .iter()
+            .copied()
+            .filter(|needle| !command.body.contains(needle))
+            .collect();
+        if !missing.is_empty() {
+            findings.push(GardeningFinding {
+                kind: "entry-routing".to_string(),
+                severity: "advisory",
+                subject: (*name).to_string(),
+                detail: format!("body no longer points to {}", missing.join(", ")),
+            });
+        }
+    }
+    findings
+}
+
+fn gardening_search_corpus(owox_dir: &Path) -> String {
+    ["brand.md", "rules.md", "context.md", "commands.toml"]
+        .into_iter()
+        .filter_map(|name| std::fs::read_to_string(owox_dir.join(name)).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase()
+}
+
+fn skill_is_referenced(corpus: &str, skill: &owox_core::Skill) -> bool {
+    let mut needles = vec![skill.id.to_lowercase()];
+    let name = skill.name.trim().to_lowercase();
+    if !name.is_empty() && name != needles[0] {
+        needles.push(name);
+    }
+    needles
+        .into_iter()
+        .filter(|needle| !needle.is_empty())
+        .any(|needle| corpus.contains(&needle))
+}
+
+fn git_path_activity(repo_root: &Path, rel: &Path) -> Option<(String, usize)> {
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["log", "-1", "--format=%H %cd", "--date=format:%Y%m%d", "--"])
+        .arg(&rel)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let (commit, updated_on) = line.split_once(' ')?;
+    let commits_since = git_rev_list_count(repo_root, &[format!("{commit}..HEAD")])?;
+    Some((updated_on.to_string(), commits_since))
+}
+
+fn git_commit_count_since_date(repo_root: &Path, ymd: &str) -> Option<usize> {
+    let since = git_since_arg(ymd)?;
+    git_rev_list_count(
+        repo_root,
+        &["--since".to_string(), since, "HEAD".to_string()],
+    )
+}
+
+fn git_rev_list_count(repo_root: &Path, args: &[String]) -> Option<usize> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(repo_root).arg("rev-list").arg("--count");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn git_since_arg(ymd: &str) -> Option<String> {
+    if ymd.len() != 8 || !ymd.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{}-{}-{}", &ymd[..4], &ymd[4..6], &ymd[6..8]))
+}
+
+fn age_days(today: &str, ymd: &str) -> Option<i64> {
+    Some(ymd_to_days(today)? - ymd_to_days(ymd)?)
+}
+
+fn expected_generated_files(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+) -> Vec<(std::path::PathBuf, owox_core::GeneratedFile)> {
+    let targets: Vec<(String, String)> = if canon.targets.entries.is_empty() {
+        vec![("codex".to_string(), ".".to_string())]
+    } else {
+        canon
+            .targets
+            .entries
+            .iter()
+            .map(|target| (target.name.clone(), target.out_dir.clone()))
+            .collect()
+    };
+    let registered = owox_core::registered_skills(owox_dir, repo_root).unwrap_or_default();
+    let commands = owox_core::command_skills(owox_dir).unwrap_or_default();
+    let mut skills = registered;
+    skills.extend(commands);
+    let mut out = Vec::new();
+    for (target_name, out_dir) in targets {
+        let Some(target) = owox_core::find(&target_name) else {
+            continue;
+        };
+        let root = repo_root.join(out_dir);
+        for file in target.generate(canon) {
+            out.push((root.join(&file.path), file));
+        }
+        for file in target.generate_skills(&skills) {
+            out.push((root.join(&file.path), file));
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+fn file_is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn file_is_executable(_path: &Path) -> bool {
+    true
+}
+
+fn untraced_canon_change_findings(repo_root: &Path, refs: &ReferenceScan) -> Vec<GardeningFinding> {
+    let base = crate::files::main_merge_base(repo_root);
+    let changed = crate::files::changed_files_since(repo_root, &base.rev);
+    let canon_changes: Vec<_> = changed
+        .into_iter()
+        .filter(|file| file.kind.is_canon_surface())
+        .collect();
+    if canon_changes.is_empty() || refs.summary.requirement_refs + refs.summary.decision_refs > 0 {
+        return Vec::new();
+    }
+    canon_changes
+        .into_iter()
+        .map(|file| GardeningFinding {
+            kind: "untraced-canon-change".to_string(),
+            severity: "advisory",
+            subject: file.path,
+            detail: "canon or docs changed without an owox requirement or decision reference"
+                .to_string(),
+        })
+        .collect()
+}
+
+fn gardening_json(findings: &[GardeningFinding]) -> serde_json::Value {
+    let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+    let mut failed = 0usize;
+    let mut advisory = 0usize;
+    for finding in findings {
+        *by_kind.entry(finding.kind.clone()).or_default() += 1;
+        if finding.severity == "failed" {
+            failed += 1;
+        } else {
+            advisory += 1;
+        }
+    }
+    serde_json::json!({
+        "summary": {
+            "total": findings.len(),
+            "failed": failed,
+            "advisory": advisory,
+            "by_kind": by_kind,
+        },
+        "findings": findings.iter().map(|finding| {
+            serde_json::json!({
+                "kind": finding.kind.clone(),
+                "severity": finding.severity,
+                "subject": finding.subject.clone(),
+                "detail": finding.detail.clone(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = m as i64 + if m > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn render_codebase_context_body(
     index: &crate::cache::CodebaseIndex,
     related_to_current_diff: &[String],
     mission: crate::cache::Mission,
+    cache: &CodebaseCacheStatus,
 ) -> String {
     let mut out = String::from("# Codebase context\n\n");
     match mission {
@@ -2987,7 +3679,12 @@ fn render_codebase_context_body(
         }
         out.push('\n');
     }
-    out.push_str("Cache:\n- stale: false\n");
+    out.push_str("Cache:\n");
+    out.push_str(&format!("- stale: {}\n", cache.stale));
+    out.push_str(&format!("- refreshed: {}\n", cache.refreshed));
+    for reason in &cache.reasons {
+        out.push_str(&format!("- refresh reason: {reason}\n"));
+    }
     if let Some(head) = &index.git_head {
         out.push_str(&format!("- git head: {}\n", short_id(head)));
     }
@@ -3037,6 +3734,422 @@ fn render_context(context: &owox_core::Context) -> String {
     out
 }
 
+fn mission_preview(
+    owox_dir: &Path,
+    repo_root: &Path,
+    mission: crate::cache::Mission,
+) -> Option<String> {
+    let decisions = list_decisions(owox_dir).unwrap_or_default();
+    let tasks = list_tasks(owox_dir).unwrap_or_default();
+    let requirements = list_requirements(owox_dir).unwrap_or_default();
+    let canon = owox_core::load_canon(owox_dir).ok();
+    if mission == crate::cache::Mission::Kickoff {
+        let fallback = owox_core::Canon::default();
+        let canon = canon.as_ref().unwrap_or(&fallback);
+        let questions = build_kickoff_questions(owox_dir, repo_root, canon, &decisions, &tasks);
+        return Some(render_kickoff_next(&questions));
+    }
+    let axes = canon
+        .as_ref()
+        .map(|canon| canon.profile.resolve().unwrap_or_default())
+        .unwrap_or_default();
+    Some(render_next(
+        &decisions,
+        &tasks,
+        &requirements,
+        &[],
+        &[],
+        &[],
+        axes,
+        AutoApproval {
+            profile: false,
+            session: false,
+        },
+        mission,
+    ))
+}
+
+fn render_kickoff_context(
+    repo_root: &Path,
+    owox_dir: &Path,
+    canon: &owox_core::Canon,
+    decisions: &[owox_core::Decision],
+    tasks: &[Task],
+) -> String {
+    let questions = build_kickoff_questions(owox_dir, repo_root, canon, decisions, tasks);
+    let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
+    let signals = owox_core::DetectSignals {
+        files: &files,
+        has_quality_layers,
+        has_version_tags,
+    };
+    let profile_declared = profile_declared_at(owox_dir);
+    let profile_draft = owox_core::detect_profile(&signals);
+    let canon_draft = owox_core::detect_canon_draft(&signals);
+    let checks = detect_checks(&detect_package_files(&files));
+    let open_decisions = decisions
+        .iter()
+        .filter(|decision| decision.status == DecisionStatus::Open)
+        .count();
+    let mut out = String::from("# Kickoff context\n\n");
+    out.push_str(
+        "Kickoff mission is active. Use this map to decide setup, not to start implementation.\n\n",
+    );
+    out.push_str("## Current state\n\n");
+    out.push_str(&format!("- phase: {}\n", canon.state.phase.as_str()));
+    out.push_str(&format!("- profile declared: {}\n", profile_declared));
+    out.push_str(&format!("- open decisions: {open_decisions}\n"));
+    out.push_str(&format!("- tasks already recorded: {}\n", tasks.len()));
+    out.push_str(&format!(
+        "- verify checks declared: {}\n\n",
+        canon.verify.checks.len()
+    ));
+
+    out.push_str("## Unresolved setup pressure\n\n");
+    if questions.is_empty() {
+        out.push_str("- no unresolved kickoff question remains\n");
+        out.push_str("- switch the mission back to work when ready\n\n");
+    } else {
+        out.push_str(&format!("- unresolved questions: {}\n", questions.len()));
+        for question in questions.iter().take(5) {
+            out.push_str(&format!(
+                "- {} / {}: {} ({})\n",
+                question.stage, question.item, question.recommendation, question.decider
+            ));
+            out.push_str(&format!("  reason: {}\n", question.reason));
+        }
+        if questions.len() > 5 {
+            out.push_str(&format!("- ... and {} more\n", questions.len() - 5));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Existing code signals\n\n");
+    if profile_declared {
+        let axes = canon.profile.resolve().unwrap_or_default();
+        out.push_str(&format!(
+            "- project nature: declared as {} / {} / {} / {}\n",
+            axes.requirements_shape.as_str(),
+            axes.prioritization.as_str(),
+            axes.delivery.as_str(),
+            axes.architecture.as_str()
+        ));
+    } else {
+        out.push_str(&format!(
+            "- project nature draft: {}\n",
+            profile_draft
+                .suggested_preset
+                .clone()
+                .unwrap_or_else(|| "no preset match".to_string())
+        ));
+        out.push_str(&format!(
+            "  evidence: {}; {}; {}; {}\n",
+            profile_draft.requirements_shape.evidence,
+            profile_draft.prioritization.evidence,
+            profile_draft.delivery.evidence,
+            profile_draft.architecture.evidence
+        ));
+    }
+    if canon_draft.is_empty() {
+        out.push_str("- guardrail draft: no strong signal from existing code\n");
+    } else {
+        out.push_str(&format!(
+            "- guardrail draft: {} layer, {} boundary, {} irreversible candidate\n",
+            canon_draft.layers.len(),
+            canon_draft.boundaries.len(),
+            canon_draft.irreversible.len()
+        ));
+        for evidence in kickoff_canon_evidence(&canon_draft).into_iter().take(3) {
+            out.push_str(&format!("  evidence: {evidence}\n"));
+        }
+    }
+    if canon.verify.checks.is_empty() {
+        if checks.is_empty() {
+            out.push_str("- verify entry draft: no common test entry detected\n");
+        } else {
+            out.push_str(&format!("- verify entry draft: {}\n", checks.join(", ")));
+        }
+    } else {
+        out.push_str(&format!(
+            "- verify entry: declared as {}\n",
+            canon
+                .verify
+                .checks
+                .iter()
+                .map(|check| check.command.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("## Read next\n\n");
+    out.push_str("- call next to get the single next setup decision\n");
+    out.push_str("- call context with scope codebase when repo shape matters\n");
+    out.push_str("- call context with scope diff when changed canon or docs matter\n");
+    out
+}
+
+fn kickoff_canon_evidence(draft: &owox_core::CanonDraft) -> Vec<String> {
+    let mut evidence = Vec::new();
+    for layer in &draft.layers {
+        evidence.push(layer.evidence.clone());
+    }
+    for boundary in &draft.boundaries {
+        evidence.push(boundary.evidence.clone());
+    }
+    for irreversible in &draft.irreversible {
+        evidence.push(irreversible.evidence.clone());
+    }
+    evidence.sort();
+    evidence.dedup();
+    evidence
+}
+
+fn kickoff_status_json(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+    decisions: &[owox_core::Decision],
+    tasks: &[Task],
+) -> serde_json::Value {
+    let questions = build_kickoff_questions(owox_dir, repo_root, canon, decisions, tasks);
+    serde_json::json!({
+        "unresolved": questions.len(),
+        "ai_drafts": questions.iter().filter(|q| q.decider == "ai").count(),
+        "human_decisions": questions.iter().filter(|q| q.decider == "human").count(),
+        "next_question": questions.first().map(kickoff_question_json),
+        "ready_to_return": questions.is_empty(),
+        "canonicalization_candidates": kickoff_candidates_json(owox_dir, repo_root, canon, tasks),
+    })
+}
+
+fn kickoff_candidates_json(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+    tasks: &[Task],
+) -> Vec<serde_json::Value> {
+    let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
+    let profile_draft = owox_core::detect_profile(&owox_core::DetectSignals {
+        files: &files,
+        has_quality_layers,
+        has_version_tags,
+    });
+    let canon_draft = owox_core::detect_canon_draft(&owox_core::DetectSignals {
+        files: &files,
+        has_quality_layers,
+        has_version_tags,
+    });
+    let checks = detect_checks(&detect_package_files(&files));
+    let thin_guardrails = canon.quality.layers.is_empty()
+        && canon.quality.boundaries.is_empty()
+        && canon.rules.irreversible.is_empty();
+    let mut out = Vec::new();
+    if !profile_declared_at(owox_dir) {
+        let reason = [
+            profile_draft.requirements_shape.evidence,
+            profile_draft.prioritization.evidence,
+            profile_draft.delivery.evidence,
+            profile_draft.architecture.evidence,
+        ]
+        .join("; ");
+        out.push(serde_json::json!({
+            "kind": "profile",
+            "route": "profile.set",
+            "summary": format!(
+                "Declare the project nature as {}",
+                profile_draft
+                    .suggested_preset
+                    .clone()
+                    .unwrap_or_else(|| "the detected draft".to_string())
+            ),
+            "reason": reason,
+        }));
+    }
+    if thin_guardrails && !canon_draft.is_empty() {
+        out.push(serde_json::json!({
+            "kind": "guardrails",
+            "route": "canon.detect draft review",
+            "summary": "Review the detected guardrails and adopt the needed ones",
+            "reason": format!(
+                "{} layer, {} boundary, {} irreversible candidate",
+                canon_draft.layers.len(),
+                canon_draft.boundaries.len(),
+                canon_draft.irreversible.len()
+            ),
+        }));
+    }
+    if canon.verify.checks.is_empty() && !checks.is_empty() {
+        out.push(serde_json::json!({
+            "kind": "verify",
+            "route": "config.toml [[verify.checks]]",
+            "summary": "Declare the first verification checks",
+            "reason": format!("Detected: {}", checks.join(", ")),
+        }));
+    }
+    if tasks.is_empty() {
+        out.push(serde_json::json!({
+            "kind": "task",
+            "route": "task.create",
+            "summary": "Record the first task before leaving kickoff",
+            "reason": "No task has been created yet",
+        }));
+    }
+    out
+}
+
+fn build_kickoff_questions(
+    owox_dir: &Path,
+    repo_root: &Path,
+    canon: &owox_core::Canon,
+    decisions: &[owox_core::Decision],
+    tasks: &[Task],
+) -> Vec<KickoffQuestion> {
+    let mut out = Vec::new();
+    for decision in decisions
+        .iter()
+        .filter(|decision| decision.status == DecisionStatus::Open)
+    {
+        out.push(KickoffQuestion {
+            stage: "入口確認",
+            item: format!("未決の判断 {} を確定する", decision.title),
+            recommendation: "いま人間が確定".to_string(),
+            reason: if decision.rationale.trim().is_empty() {
+                "open decision が残ると後続が止まりやすい".to_string()
+            } else {
+                decision.rationale.trim().to_string()
+            },
+            decider: "human",
+            options: vec![
+                "adopt".to_string(),
+                "reject".to_string(),
+                "defer".to_string(),
+            ],
+        });
+    }
+
+    if !profile_declared_at(owox_dir) {
+        let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
+        let draft = owox_core::detect_profile(&owox_core::DetectSignals {
+            files: &files,
+            has_quality_layers,
+            has_version_tags,
+        });
+        let recommendation = draft
+            .suggested_preset
+            .clone()
+            .unwrap_or_else(|| "clean-arch-app".to_string());
+        let reason = [
+            draft.requirements_shape.evidence,
+            draft.prioritization.evidence,
+            draft.delivery.evidence,
+            draft.architecture.evidence,
+        ]
+        .join("; ");
+        out.push(KickoffQuestion {
+            stage: "作業の型",
+            item: "project nature を決める".to_string(),
+            recommendation,
+            reason,
+            decider: "human",
+            options: owox_core::builtin_bundle_names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        });
+    }
+
+    let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
+    let canon_draft = owox_core::detect_canon_draft(&owox_core::DetectSignals {
+        files: &files,
+        has_quality_layers,
+        has_version_tags,
+    });
+    let thin_guardrails = canon.quality.layers.is_empty()
+        && canon.quality.boundaries.is_empty()
+        && canon.rules.irreversible.is_empty();
+    if thin_guardrails && !canon_draft.is_empty() {
+        out.push(KickoffQuestion {
+            stage: "安全境界",
+            item: "初期ガードレール案を採るか決める".to_string(),
+            recommendation: "検出案を初期値として採る".to_string(),
+            reason: "既存コードから層・境界・不可逆操作の案が取れている".to_string(),
+            decider: "human",
+            options: vec![
+                "検出案を採る".to_string(),
+                "一部だけ採る".to_string(),
+                "手で決める".to_string(),
+            ],
+        });
+    }
+
+    let checks = detect_checks(&detect_package_files(&crate::files::list_repo_files(
+        repo_root,
+    )));
+    if canon.verify.checks.is_empty() && !checks.is_empty() {
+        out.push(KickoffQuestion {
+            stage: "作業の型",
+            item: "最初の検証入口を決める".to_string(),
+            recommendation: checks[0].clone(),
+            reason: "repo から既存の test / build 入口が見えている".to_string(),
+            decider: "human",
+            options: checks,
+        });
+    }
+
+    if tasks.is_empty() {
+        out.push(KickoffQuestion {
+            stage: "初期 task",
+            item: "最初の task 分割".to_string(),
+            recommendation: "AI仮決定".to_string(),
+            reason: "repo 構造と未決一覧から初手は機械的に切りやすい".to_string(),
+            decider: "ai",
+            options: vec!["AI仮決定".to_string(), "人間が先に決める".to_string()],
+        });
+    }
+
+    out
+}
+
+fn render_kickoff_next(questions: &[KickoffQuestion]) -> String {
+    let mut out = String::from("# What to decide next\n\n");
+    out.push_str(
+        "Kickoff mission is active. Resolve one setup decision before implementation.\n\n",
+    );
+    let Some(question) = questions.first() else {
+        out.push_str("No unresolved kickoff decision remains.\n\n");
+        out.push_str("Decide whether to switch the mission back to work.\n");
+        return out;
+    };
+    out.push_str(&format!("Stage: {}\n", question.stage));
+    out.push_str(&format!("Decide: {}\n", question.item));
+    out.push_str(&format!("Recommended: {}\n", question.recommendation));
+    out.push_str(&format!("Reason: {}\n", question.reason));
+    out.push_str(&format!("Decider: {}\n", question.decider));
+    out.push_str("Options:\n");
+    for option in &question.options {
+        out.push_str(&format!("- {option}\n"));
+    }
+    out.push_str("Next: waiting for one answer\n");
+    out
+}
+
+fn kickoff_question_json(question: &KickoffQuestion) -> serde_json::Value {
+    serde_json::json!({
+        "stage": question.stage,
+        "item": question.item,
+        "recommendation": question.recommendation,
+        "reason": question.reason,
+        "decider": question.decider,
+        "options": question.options,
+    })
+}
+
+fn profile_declared_at(owox_dir: &Path) -> bool {
+    owox_dir.join("profile.toml").exists()
+}
+
 /// 次に手を付けるもの = 未決 (status=open の来歴) + ready タスク + trace が要る要件を描画する。
 ///
 /// trace が要る要件 = accepted だが受け入れ基準が無い or 検証 link が欠けるもの。
@@ -3047,6 +4160,7 @@ fn render_next(
     requirements: &[owox_core::Requirement],
     decay: &[DecayFinding],
     routines: &[owox_core::RoutineSuggestion],
+    gardening: &[GardeningFinding],
     axes: owox_core::Axes,
     auto: AutoApproval,
     mission: crate::cache::Mission,
@@ -3093,6 +4207,7 @@ fn render_next(
         && untraced.is_empty()
         && decay.is_empty()
         && routines.is_empty()
+        && gardening.is_empty()
         && unprioritized.is_empty()
         && auto_pending.is_empty()
         && !auto.active()
@@ -3201,6 +4316,9 @@ fn render_next(
     if !decay.is_empty() {
         out.push_str(&render_decay(decay));
     }
+    if !gardening.is_empty() {
+        out.push_str(&render_gardening(gardening));
+    }
     if !routines.is_empty() {
         out.push_str(&render_routines(routines));
     }
@@ -3216,13 +4334,33 @@ fn render_routines(routines: &[owox_core::RoutineSuggestion]) -> String {
     );
     for r in routines.iter().take(SHOWN) {
         out.push_str(&format!(
-            "- {} (seen {}x)\n",
+            "- {} (seen {}x, {})\n",
             r.sequence.join(" → "),
-            r.occurrences
+            r.occurrences,
+            r.kind.as_str()
         ));
+        if let Some(script) = &r.suggested_script {
+            out.push_str(&format!("  script: {script}\n"));
+        }
     }
     if routines.len() > SHOWN {
         out.push_str(&format!("- … and {} more\n", routines.len() - SHOWN));
+    }
+    out.push('\n');
+    out
+}
+
+fn render_gardening(gardening: &[GardeningFinding]) -> String {
+    const SHOWN: usize = 5;
+    let mut out = String::from("## Gardening candidates\n\n");
+    for finding in gardening.iter().take(SHOWN) {
+        out.push_str(&format!(
+            "- {} [{}]: {}\n",
+            finding.subject, finding.kind, finding.detail
+        ));
+    }
+    if gardening.len() > SHOWN {
+        out.push_str(&format!("- … and {} more\n", gardening.len() - SHOWN));
     }
     out.push('\n');
     out
@@ -3345,6 +4483,53 @@ pub fn run(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn temp_git_repo(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let repo = std::env::temp_dir().join(format!("{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        repo
+    }
+
+    fn git_commit(repo: &Path, rel: &str, contents: &str, when: &str, message: &str) {
+        let path = repo.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
+        let add = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["add", rel])
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let commit = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_DATE", when)
+            .env("GIT_COMMITTER_DATE", when)
+            .env("GIT_AUTHOR_NAME", "owox")
+            .env("GIT_AUTHOR_EMAIL", "owox@example.com")
+            .env("GIT_COMMITTER_NAME", "owox")
+            .env("GIT_COMMITTER_EMAIL", "owox@example.com")
+            .status()
+            .unwrap();
+        assert!(commit.success());
+    }
 
     #[test]
     fn extract_references_trims_trailing_punctuation() {
@@ -3390,6 +4575,37 @@ mod tests {
     }
 
     #[test]
+    fn codebase_stale_reasons_detect_head_file_and_age() {
+        let repo = std::env::temp_dir().join(format!("owox-codebase-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+
+        let index = crate::cache::CodebaseIndex {
+            root_kind: "rust-crate".to_string(),
+            package_files: vec!["Cargo.toml".to_string()],
+            areas: Vec::new(),
+            entrypoints: vec!["src/lib.rs".to_string()],
+            checks: vec!["cargo test".to_string()],
+            generated_or_external: Vec::new(),
+            source_files: vec!["Cargo.toml".to_string(), "src/lib.rs".to_string()],
+            git_head: Some("old-head".to_string()),
+            generated_on: "20260601".to_string(),
+        };
+
+        std::fs::remove_file(repo.join("src/lib.rs")).unwrap();
+        let reasons = codebase_stale_reasons(&repo, &index, Some("new-head"), "20260626");
+        assert!(reasons.iter().any(|r| r == "git head changed"));
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r == "evidence file missing: src/lib.rs")
+        );
+        assert!(reasons.iter().any(|r| r.contains("cache age")));
+    }
+
+    #[test]
     fn diff_context_body_suggests_codebase_when_needed() {
         let data = DiffContextData {
             base: crate::files::DiffBase {
@@ -3405,6 +4621,7 @@ mod tests {
             canon_changes: Vec::new(),
             reference_summary: ReferenceSummary::default(),
             review_hints: vec!["h".to_string()],
+            gardening_hints: Vec::new(),
             needs_codebase: true,
             guidance: owox_core::DeliverySelection::default(),
         };
@@ -3442,6 +4659,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn kickoff_context_surfaces_setup_signals_without_raw_dump() {
+        let repo = temp_git_repo("owox-kickoff-context");
+        let owox = repo.join(".owox");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join("domain")).unwrap();
+        std::fs::create_dir_all(repo.join("infra")).unwrap();
+        std::fs::create_dir_all(&owox).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(repo.join("domain/core.rs"), "pub fn core() {}\n").unwrap();
+        std::fs::write(repo.join("infra/db.rs"), "pub fn db() {}\n").unwrap();
+
+        let out = render_kickoff_context(&repo, &owox, &owox_core::Canon::default(), &[], &[]);
+        assert!(out.contains("# Kickoff context"));
+        assert!(out.contains("project nature draft"));
+        assert!(out.contains("guardrail draft"));
+        assert!(out.contains("verify entry draft: cargo test, cargo clippy"));
+        assert!(out.contains("初期ガードレール案を採るか決める"));
+        assert!(!out.contains("quality_toml"));
+        assert!(!out.contains("rules_markdown"));
     }
 
     fn axes_with(prioritization: owox_core::Prioritization) -> owox_core::Axes {
@@ -3503,6 +4747,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -3517,6 +4762,7 @@ mod tests {
     fn next_announces_open_auto_window() {
         // session 窓 (auto_session=true) の文言。
         let out = render_next(
+            &[],
             &[],
             &[],
             &[],
@@ -3542,6 +4788,7 @@ mod tests {
             ..owox_core::Axes::default()
         };
         let out = render_next(
+            &[],
             &[],
             &[],
             &[],
@@ -3577,6 +4824,7 @@ mod tests {
         };
         let out = render_next(
             std::slice::from_ref(&d),
+            &[],
             &[],
             &[],
             &[],
@@ -3632,6 +4880,7 @@ mod tests {
         let decisions = vec![practice, plain];
         let out = render_next(
             &decisions,
+            &[],
             &[],
             &[],
             &[],
@@ -3696,6 +4945,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             phased,
             AutoApproval {
                 profile: false,
@@ -3712,6 +4962,7 @@ mod tests {
         let out = render_next(
             &[],
             &[task],
+            &[],
             &[],
             &[],
             &[],
@@ -3737,6 +4988,7 @@ mod tests {
             &reqs,
             &[],
             &[],
+            &[],
             layered,
             AutoApproval {
                 profile: false,
@@ -3755,6 +5007,7 @@ mod tests {
             &[],
             &[],
             &reqs,
+            &[],
             &[],
             &[],
             flat,
@@ -3779,6 +5032,7 @@ mod tests {
             &reqs,
             &[],
             &[],
+            &[],
             ideal,
             AutoApproval {
                 profile: false,
@@ -3797,6 +5051,7 @@ mod tests {
             &[],
             &[],
             &reqs,
+            &[],
             &[],
             &[],
             incremental,
@@ -3821,6 +5076,7 @@ mod tests {
             &[],
             &[],
             &decay,
+            &[],
             &[],
             owox_core::Axes::default(),
             AutoApproval {
@@ -3847,6 +5103,7 @@ mod tests {
             &[],
             &decay,
             &[],
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -3862,6 +5119,10 @@ mod tests {
         let routines = vec![owox_core::RoutineSuggestion {
             sequence: vec!["task.create".to_string(), "task.note".to_string()],
             occurrences: 6,
+            kind: owox_core::RoutineKind::Skill,
+            reasons: vec!["repeated 6 times".to_string()],
+            suggested_script: None,
+            test_hint: None,
         }];
         let out = render_next(
             &[],
@@ -3869,6 +5130,7 @@ mod tests {
             &[],
             &[],
             &routines,
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -3882,8 +5144,222 @@ mod tests {
     }
 
     #[test]
+    fn gardening_section_lists_candidates() {
+        let gardening = vec![GardeningFinding {
+            kind: "duplicate-practice".to_string(),
+            severity: "advisory",
+            subject: "20260620-practice".to_string(),
+            detail: "looks duplicated".to_string(),
+        }];
+        let out = render_next(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &gardening,
+            owox_core::Axes::default(),
+            AutoApproval {
+                profile: false,
+                session: false,
+            },
+            crate::cache::Mission::Work,
+        );
+        assert!(out.contains("## Gardening candidates"));
+        assert!(out.contains("duplicate-practice"));
+    }
+
+    #[test]
+    fn kickoff_next_renders_one_question() {
+        let questions = vec![KickoffQuestion {
+            stage: "安全境界",
+            item: "初期ガードレール案を採るか決める".to_string(),
+            recommendation: "検出案を初期値として採る".to_string(),
+            reason: "既存コードから案が取れている".to_string(),
+            decider: "human",
+            options: vec!["検出案を採る".to_string(), "手で決める".to_string()],
+        }];
+        let out = render_kickoff_next(&questions);
+        assert!(out.contains("Stage: 安全境界"));
+        assert!(out.contains("Recommended: 検出案を初期値として採る"));
+        assert!(out.contains("Decider: human"));
+    }
+
+    #[test]
+    fn kickoff_question_json_has_required_fields() {
+        let value = kickoff_question_json(&KickoffQuestion {
+            stage: "初期 task",
+            item: "最初の task 分割".to_string(),
+            recommendation: "AI仮決定".to_string(),
+            reason: "repo 構造から切りやすい".to_string(),
+            decider: "ai",
+            options: vec!["AI仮決定".to_string()],
+        });
+        assert_eq!(value["decider"], "ai");
+        assert_eq!(value["stage"], "初期 task");
+        assert!(value["options"].is_array());
+    }
+
+    #[test]
+    fn kickoff_status_lists_return_candidates() {
+        let repo = temp_git_repo("owox-kickoff-status");
+        let owox = repo.join(".owox");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(&owox).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let value = kickoff_status_json(&owox, &repo, &owox_core::Canon::default(), &[], &[]);
+        assert_eq!(value["ready_to_return"], serde_json::json!(false));
+        let candidates = value["canonicalization_candidates"].as_array().unwrap();
+        assert!(candidates.iter().any(|c| c["route"] == "profile.set"));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c["route"] == "config.toml [[verify.checks]]")
+        );
+        assert!(candidates.iter().any(|c| c["route"] == "task.create"));
+    }
+
+    #[test]
+    fn mission_preview_for_kickoff_returns_question_text() {
+        let repo = temp_git_repo("owox-mission-preview");
+        let owox = repo.join(".owox");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(&owox).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let preview = mission_preview(&owox, &repo, crate::cache::Mission::Kickoff).unwrap();
+        assert!(preview.contains("What to decide next"));
+        assert!(preview.contains("Recommended:"));
+    }
+
+    #[test]
+    fn floor_bloat_detected_when_floor_is_too_large() {
+        let mut canon = owox_core::Canon::default();
+        canon.brand.vision = "x".repeat(20_000);
+        let findings = floor_bloat_findings(&canon);
+        assert!(findings.iter().any(|finding| finding.kind == "floor-bloat"));
+    }
+
+    #[test]
+    fn command_routing_detects_missing_required_tool_mentions() {
+        let dir = std::env::temp_dir().join(format!("owox-routing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("commands.toml"),
+            "[[command]]\nname = \"review\"\ndescription = \"r\"\nbody = \"Only call verify.run\"\n",
+        )
+        .unwrap();
+        let findings = command_routing_findings(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| { finding.kind == "entry-routing" && finding.subject == "review" })
+        );
+    }
+
+    #[test]
+    fn generated_drift_detects_modified_generated_file() {
+        let repo =
+            std::env::temp_dir().join(format!("owox-generated-drift-{}", std::process::id()));
+        let owox = repo.join(".owox");
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&owox).unwrap();
+        std::fs::create_dir_all(repo.join(".codex")).unwrap();
+        std::fs::write(repo.join(".codex/hooks.json"), "{\"broken\":true}\n").unwrap();
+        let findings = generated_drift_findings(&owox, &repo, &owox_core::Canon::default());
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.kind == "generated-drift")
+        );
+    }
+
+    #[test]
+    fn low_use_skill_detected_after_age_and_repo_activity() {
+        let repo = temp_git_repo("owox-low-use-skill");
+        let owox = repo.join(".owox");
+        git_commit(
+            &repo,
+            ".owox/skills/quiet/SKILL.md",
+            "---\nname: quiet\ndescription: q\n---\n\nDo the quiet task.\n",
+            "2026-01-01T00:00:00Z",
+            "add skill",
+        );
+        for i in 0..20 {
+            git_commit(
+                &repo,
+                "notes.txt",
+                &format!("note {i}\n"),
+                "2026-03-01T00:00:00Z",
+                &format!("note-{i}"),
+            );
+        }
+        let findings = low_use_skill_findings(&owox, &repo, "20260626");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.kind == "low-use" && finding.subject == "skill quiet")
+        );
+    }
+
+    #[test]
+    fn low_use_practice_detected_only_outside_floor_budget() {
+        let repo = temp_git_repo("owox-low-use-practice");
+        git_commit(
+            &repo,
+            "notes.txt",
+            "start\n",
+            "2026-03-01T00:00:00Z",
+            "start",
+        );
+        for i in 0..20 {
+            git_commit(
+                &repo,
+                "notes.txt",
+                &format!("note {i}\n"),
+                "2026-04-01T00:00:00Z",
+                &format!("note-{i}"),
+            );
+        }
+        let mut canon = owox_core::Canon::default();
+        canon.settings.context.practices_floor_max = 1;
+        canon.practices.entries = vec![
+            owox_core::Practice {
+                date: "20260601".to_string(),
+                text: "fresh".to_string(),
+            },
+            owox_core::Practice {
+                date: "20260301".to_string(),
+                text: "older".to_string(),
+            },
+        ];
+        let findings = low_use_practice_findings(&repo, &canon, "20260626");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.kind == "low-use" && finding.subject == "practice 20260301")
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.subject != "practice 20260601")
+        );
+    }
+
+    #[test]
     fn next_mentions_kickoff_mission() {
         let out = render_next(
+            &[],
             &[],
             &[],
             &[],
