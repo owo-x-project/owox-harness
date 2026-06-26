@@ -100,11 +100,12 @@ fn floor_carries_orientation_routing_and_vision() {
     let canon = load_canon(&fixture_owox()).expect("正本を読める");
     let floor = floor_context(&canon);
 
-    // 向き付けと意図ルーティング (AGENTS.md 廃止の代替・曖昧リクエスト対応の要)。
+    // 薄い床: canon 禁止と entry map。
     assert!(floor.contains("Do not read or edit the canon"));
-    assert!(floor.contains("Acting on what the human asks"));
-    assert!(floor.contains("canon.propose"));
-    assert!(floor.contains("rules.lookup"));
+    assert!(floor.contains("## Entry map"));
+    assert!(floor.contains("Use kickoff to orient"));
+    assert!(floor.contains("Use next to choose work"));
+    assert!(floor.contains("rules.lookup, glossary.lookup, and practice.lookup"));
     // Vision は床に常時。
     assert!(floor.contains("## Vision"));
     assert!(floor.contains(&canon.brand.vision));
@@ -119,16 +120,14 @@ fn floor_carries_orientation_routing_and_vision() {
 }
 
 #[test]
-fn floor_omits_rules_and_brand_lists_keeps_style() {
+fn floor_omits_rules_brand_lists_and_style() {
     let owox = fixtures().join("withrules/.owox");
     let canon = load_canon(&owox).expect("正本を読める");
     let floor = floor_context(&canon);
 
-    // 全体スタイルは床に常時。
-    assert!(floor.contains("## Style"));
-    assert!(floor.contains("Prefer short, plain sentences"));
-
-    // rules 本文は床に出さない (オンデマンド注入と rules.lookup へ寄せた)。
+    // rules 本文と style 一覧は床に出さない。
+    assert!(!floor.contains("## Style"));
+    assert!(!floor.contains("Prefer short, plain sentences"));
     assert!(!floor.contains("## Rules"));
     assert!(!floor.contains("## Change policy"));
     assert!(!floor.contains("Match the existing style"));
@@ -195,11 +194,10 @@ fn target_irreversible_detect_denies() {
 fn floor_injects_glossary_term_names() {
     let canon = load_canon(&fixtures().join("withrules/.owox")).expect("正本を読める");
     let floor = floor_context(&canon);
-    // 用語名は床に live で届く。
-    assert!(floor.contains("## Glossary terms"));
-    assert!(floor.contains("- canon"));
+    // 用語一覧は出さず lookup 導線だけ残す。
+    assert!(!floor.contains("## Glossary terms"));
+    assert!(!floor.contains("- canon"));
     assert!(floor.contains("glossary.lookup"));
-    // 定義本体は注入しない (出現時 push と lookup で取る)。
     assert!(!floor.contains("the source of truth"));
 }
 

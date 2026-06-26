@@ -587,12 +587,19 @@ fn stop() -> ExitCode {
 /// 正本が無い・読めない場合は妨げない (黙って続行)。
 fn session_start() -> ExitCode {
     let input = read_input();
+    let owox = owox_dir(input.cwd.as_deref());
+
+    if let (Some(session_id), Some(launcher_pid)) =
+        (input.session_id.as_deref(), crate::cache::launcher_pid())
+    {
+        crate::cache::write_launcher_session(&owox, launcher_pid, session_id);
+    }
 
     // 自動承認の窓はセッション限り。新しいセッションの開始 (startup|resume|compact) ごとに閉じ、
     // 人間が毎回明示的に開け直す (`docs/decisions/20260619-承認と自動改善ループ.md`)。
-    crate::cache::close_auto_window(&owox_dir(input.cwd.as_deref()));
+    crate::cache::close_auto_window(&owox);
 
-    let canon = match owox_core::load_canon(&owox_dir(input.cwd.as_deref())) {
+    let canon = match owox_core::load_canon(&owox) {
         Ok(canon) => canon,
         Err(err) => {
             eprintln!("owox hook session-start: 正本を読めない: {err}");
@@ -600,11 +607,18 @@ fn session_start() -> ExitCode {
         }
     };
 
-    // 床 + 育てたスキルの能動提示。スキルはテストを走らせず読むだけ (高速)。読めない時は床のみ。
+    // 床は薄い地図だけを入れる。任務と current pressure は mcp 側で live 計算する。
     let mut context = owox_core::floor_context(&canon);
-    if let Ok(skills) = owox_core::load_skills(&owox_dir(input.cwd.as_deref())) {
-        context.push_str(&owox_core::render_skills_section(&skills));
-    }
+    let mission = input
+        .session_id
+        .as_deref()
+        .map(|sid| crate::cache::mission_for_session(&owox, sid))
+        .unwrap_or(crate::cache::Mission::Work);
+    context.push_str(&format!("Current mission: {}.\n\n", mission.as_str()));
+    context.push_str(&current_pressure_line(&owox, &canon));
+    context.push_str(
+        "Use context scope=\"codebase\" when you need a repo map before choosing files to read.\n",
+    );
     let output = HookOutput {
         hook_specific_output: AdditionalContextOutput {
             hook_event_name: "SessionStart",
@@ -635,6 +649,29 @@ fn owox_dir(cwd: Option<&str>) -> PathBuf {
 /// 正本を読む。読めなければ None (呼び手は既定動作へ退避する)。
 fn load_canon_from(cwd: Option<&str>) -> Option<owox_core::Canon> {
     owox_core::load_canon(&owox_dir(cwd)).ok()
+}
+
+fn current_pressure_line(owox: &Path, canon: &owox_core::Canon) -> String {
+    let decisions = owox_core::list_decisions(owox).unwrap_or_default();
+    let tasks = owox_core::list_tasks(owox).unwrap_or_default();
+    let open = decisions
+        .iter()
+        .filter(|d| d.status == owox_core::DecisionStatus::Open)
+        .count();
+    let ready = tasks
+        .iter()
+        .filter(|t| owox_core::is_ready(t, &tasks))
+        .count();
+    let stale = owox_core::run_decay(
+        &tasks,
+        &decisions,
+        &canon.quality.decay,
+        &crate::clock::today_utc(),
+    )
+    .len();
+    format!(
+        "Current pressure: {open} open decisions, {ready} ready tasks, {stale} stale items.\n\n"
+    )
 }
 
 /// 作業ツリーに verify 対象の変更があるか。.owox 配下 (来歴・タスク・キャッシュ) は除外する。

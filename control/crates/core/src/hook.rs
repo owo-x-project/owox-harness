@@ -23,13 +23,6 @@ pub fn floor_context(canon: &Canon) -> String {
     let mut out = String::new();
     out.push_str("# Project context\n\n");
 
-    // 性質軸を一度だけ解決し、ルーティングと向き付け両方で使う。読めない時はフル方法論既定で振る舞う。
-    let axes = canon.profile.resolve().ok();
-
-    render_orientation(&mut out);
-    render_routing(&mut out, axes.as_ref());
-    render_orchestration(&mut out, canon);
-
     // 応答言語の追従。指示文は英語固定だが、人間への応答だけ正本設定の言語に合わせる
     // (`docs/decisions/20260613-Phase5-実機検証の是正.md`)。未設定なら注入しない。
     if let Some(lang) = &canon.settings.language {
@@ -41,82 +34,26 @@ pub fn floor_context(canon: &Canon) -> String {
     out.push_str(&canon.brand.vision);
     out.push_str("\n\n");
 
-    // 全体スタイルは作業全般に効くため常時。他の brand 項目は語トリガ push へ寄せる。
-    render_list(&mut out, "Style", &canon.brand.style);
-
     out.push_str("## Project state\n\n");
     out.push_str(&format!("Phase: {}.\n", canon.state.phase.as_str()));
     out.push_str(phase_guidance(canon.state.phase));
     out.push_str("\n\n");
 
-    // 性質 (固定) を 1 行で。どの方法論モジュールが効くかを向き付ける。詳細は profile.get。
-    if let Some(axes) = &axes {
-        out.push_str("## Project nature\n\n");
-        out.push_str(&format!(
-            "requirements-shape={}, prioritization={}, delivery={}, architecture={}. These turn the development methodology on or off; see profile.get for which modules are active.\n\n",
-            axes.requirements_shape.as_str(),
-            axes.prioritization.as_str(),
-            axes.delivery.as_str(),
-            axes.architecture.as_str(),
-        ));
-    }
+    out.push_str("## Canon\n\n");
+    out.push_str(
+        "Do not read or edit the canon under .owox/ directly. Use canon.add to add, canon.propose to change or remove, and owox lookup tools to read.\n\n",
+    );
 
-    // 用語名は live な canon から注入する (動的 CRUD で古びないため)。定義は出現時 push と glossary.lookup。
-    // 肥大化時 (上限超過) は一覧を出さず glossary.lookup へ寄せる (床のトークンを守る)。
-    if !canon.glossary.entries.is_empty() {
-        out.push_str("## Glossary terms\n\n");
-        let total = canon.glossary.entries.len();
-        if total <= canon.settings.context.glossary_floor_max {
-            out.push_str(
-                "These names have project-specific meanings. Their definitions are injected when they appear; to look one up, use glossary.lookup. Do not read the canon files directly.\n",
-            );
-            for entry in &canon.glossary.entries {
-                out.push_str("- ");
-                out.push_str(&entry.term);
-                out.push('\n');
-            }
-        } else {
-            out.push_str(&format!(
-                "This project defines {total} glossary terms. Their definitions are injected when a term appears in your work; look any term up with glossary.lookup. Do not read the canon files directly.\n",
-            ));
-        }
-        out.push('\n');
-    }
-
-    // 成長層 (practices) のライブ注入。経験から育つ運用指針を届ける
-    // (`docs/decisions/20260614-Phase7-経験IOと二層ルール.md`)。肥大化時は新しい順に上位だけ床へ出し、
-    // 残りは practice.lookup でオンデマンドへ降格する
-    // (`docs/decisions/20260621-Phase9-経験層スケールとGitHub連携とkickoff束ね.md`)。
-    if !canon.practices.entries.is_empty() {
-        out.push_str("## Practices\n\n");
-        out.push_str("Operating practices grown from this project's experience. Follow them.\n");
-        let max = canon.settings.context.practices_floor_max;
-        let total = canon.practices.entries.len();
-        if total <= max {
-            for p in &canon.practices.entries {
-                out.push_str("- ");
-                out.push_str(&p.text);
-                out.push('\n');
-            }
-        } else {
-            let mut recent: Vec<&crate::model::Practice> = canon.practices.entries.iter().collect();
-            // 日付降順で新しい順。鮮度の高い指針ほど効くため (decay と整合)。
-            recent.sort_by(|a, b| b.date.cmp(&a.date));
-            for p in recent.into_iter().take(max) {
-                out.push_str("- ");
-                out.push_str(&p.text);
-                out.push('\n');
-            }
-            out.push_str(&format!(
-                "Showing the {max} most recent of {total} practices; look up older ones by keyword with practice.lookup.\n",
-            ));
-        }
-        out.push('\n');
-    }
-
-    out.push_str("## Read next\n\n");
-    out.push_str("- the context tool: what to read for the current task\n");
-    out.push_str("- the next tool: what to decide next + ready tasks\n");
+    out.push_str("## Entry map\n\n");
+    out.push_str("- Use kickoff to orient.\n");
+    out.push_str("- Use next to choose work.\n");
+    out.push_str("- Use context to find what to read.\n");
+    out.push_str("- Use verify before finishing.\n");
+    out.push_str("- Use review to inspect changes.\n");
+    out.push_str("- Use skill to grow or manage skills.\n");
+    out.push_str(
+        "- Use rules.lookup, glossary.lookup, and practice.lookup when rules or terms matter.\n",
+    );
 
     out
 }
@@ -1790,12 +1727,10 @@ mod tests {
         assert!(out.contains("regression test"));
     }
 
-    /// 肥大化時の自動降格: 上限超過で glossary 用語名一覧を出さず、practices は新しい順に上位だけ。
+    /// glossary / practices は床へ一覧しない。lookup 導線だけ残す。
     #[test]
-    fn floor_demotes_glossary_and_practices_over_limit() {
+    fn floor_omits_glossary_and_practices() {
         let mut canon = canon_with_glossary(&[("a", "da"), ("b", "db"), ("c", "dc")]);
-        canon.settings.context.glossary_floor_max = 2;
-        canon.settings.context.practices_floor_max = 1;
         canon.practices = crate::model::Practices {
             entries: vec![
                 crate::model::Practice {
@@ -1809,37 +1744,34 @@ mod tests {
             ],
         };
         let out = floor_context(&canon);
-        // glossary: 一覧を出さず lookup へ寄せる。
-        assert!(out.contains("3 glossary terms"));
+        assert!(!out.contains("## Glossary terms"));
         assert!(!out.contains("\n- a\n"));
-        // practices: 新しい順に上位1件 + lookup 案内。
-        assert!(out.contains("newest practice"));
-        assert!(!out.contains("oldest practice"));
+        assert!(!out.contains("## Practices"));
+        assert!(!out.contains("newest practice"));
+        assert!(out.contains("glossary.lookup"));
         assert!(out.contains("practice.lookup"));
     }
 
-    /// 上限以下なら従来どおり全列挙する。
+    /// 用語が少なくても床へ一覧しない。
     #[test]
-    fn floor_lists_all_under_limit() {
+    fn floor_never_lists_glossary_terms() {
         let out = floor_context(&canon_with_glossary(&[("alpha", "d")]));
-        assert!(out.contains("\n- alpha\n"));
+        assert!(!out.contains("\n- alpha\n"));
     }
 
-    /// 床に向き付けと意図ルーティングが入る (AGENTS.md 廃止の代替・曖昧リクエスト対応の要)。
+    /// 床は canon 禁止と entry map だけを残す。
     #[test]
-    fn floor_carries_orientation_and_routing() {
+    fn floor_carries_canon_rule_and_entry_map() {
         let out = floor_context(&canon_with_glossary(&[]));
-        // 向き付け: canon 直読み/編集禁止。
         assert!(out.contains("Do not read or edit the canon"));
-        // 意図ルーティング: tool 名を言わなくても飛べる対応表。
-        assert!(out.contains("Acting on what the human asks"));
-        assert!(out.contains("canon.propose"));
-        assert!(out.contains("rules.lookup"));
-        assert!(out.contains("review.lenses for the pruning perspective"));
-        // 調査結果は knowledge.add へ向ける (practices と区別)。
-        assert!(out.contains("knowledge.add"));
-        // 注入文に括弧補足を入れない。
-        assert!(!out.contains(" ("));
+        assert!(out.contains("## Entry map"));
+        assert!(out.contains("Use kickoff to orient"));
+        assert!(out.contains("Use next to choose work"));
+        assert!(out.contains("Use context to find what to read"));
+        assert!(out.contains("Use verify before finishing"));
+        assert!(out.contains("Use review to inspect changes"));
+        assert!(out.contains("Use skill to grow or manage skills"));
+        assert!(out.contains("rules.lookup, glossary.lookup, and practice.lookup"));
     }
 
     /// 要件ルーティングは prfaq の時だけ PRFAQ 起草を直書きし、ideal-first の時だけ優先度を人間へ向ける。
@@ -1865,27 +1797,26 @@ mod tests {
         assert!(out2.contains("functional or non-functional"));
     }
 
-    /// 床は rules 本文と brand リストを載せない (オンデマンドへ寄せた)。Vision と全体スタイルは残す。
+    /// 床は Vision を残し、それ以外の長い常設一覧を落とす。
     #[test]
-    fn floor_omits_rules_and_brand_lists_keeps_style() {
+    fn floor_omits_rules_brand_lists_and_style() {
         let mut canon = canon_with_glossary(&[]);
         canon.brand.style = vec!["short sentences".to_string()];
         canon.brand.values = vec!["clarity".to_string()];
         canon.rules.change_policy = vec!["match existing style".to_string()];
         let out = floor_context(&canon);
         assert!(out.contains("## Vision"));
-        assert!(out.contains("## Style"));
-        assert!(out.contains("short sentences"));
-        // rules 本文・brand リストは床に出さない。
         assert!(!out.contains("## Rules"));
         assert!(!out.contains("match existing style"));
         assert!(!out.contains("## Values"));
         assert!(!out.contains("clarity"));
+        assert!(!out.contains("## Style"));
+        assert!(!out.contains("short sentences"));
     }
 
-    /// 成長層 (practices) が session 開始でライブ注入される。
+    /// practices は lookup 導線だけを残し、本文を床へ出さない。
     #[test]
-    fn session_start_injects_practices() {
+    fn floor_points_to_practice_lookup_without_listing_practices() {
         let mut canon = canon_with_glossary(&[]);
         canon.practices = crate::model::Practices {
             entries: vec![crate::model::Practice {
@@ -1894,8 +1825,9 @@ mod tests {
             }],
         };
         let out = floor_context(&canon);
-        assert!(out.contains("## Practices"));
-        assert!(out.contains("always add a regression test"));
+        assert!(out.contains("practice.lookup"));
+        assert!(!out.contains("## Practices"));
+        assert!(!out.contains("always add a regression test"));
     }
 
     /// policy_injection: rules 語が出たら `## Rules` 本文を push し、出ていなければ素通り。
@@ -2005,8 +1937,8 @@ mod tests {
     fn session_context_points_to_tools_not_resources() {
         // 読みは tool 一本化。owox:// resource でなく context/next tool へ誘導する。
         let out = floor_context(&canon_with_glossary(&[]));
-        assert!(out.contains("the context tool"));
-        assert!(out.contains("the next tool"));
+        assert!(out.contains("Use context to find what to read"));
+        assert!(out.contains("Use next to choose work"));
         assert!(!out.contains("owox://"));
     }
 
@@ -2057,24 +1989,12 @@ mod tests {
         assert!(out.contains("Before you design or implement"));
     }
 
-    /// 床にオーケストレーション節が注入される。
+    /// オーケストレーション節は床から外す。
     #[test]
-    fn floor_carries_orchestration_section() {
+    fn floor_omits_orchestration_section() {
         let out = floor_context(&canon_with_glossary(&[]));
-        // 節見出し。
-        assert!(out.contains("## Orchestration"), "section heading missing");
-        // 役割名 (canon のデフォルト5役割)。
-        assert!(out.contains("investigate"), "investigate role missing");
-        assert!(out.contains("implement"), "implement role missing");
-        // handoff の .owox 経由とサブエージェントの差し戻し。
-        assert!(out.contains(".owox"), "handoff via .owox not mentioned");
-        assert!(
-            out.contains("hand it back to a human"),
-            "parent handback not mentioned"
-        );
-        // 変種 (adversarial)。
-        assert!(out.contains("adversarial"), "adversarial variant missing");
-        // 括弧補足を含まない (床文体の原則・memory 方針)。
-        assert!(!out.contains(" ("), "parenthetical found in floor context");
+        assert!(!out.contains("## Orchestration"));
+        assert!(!out.contains("investigate"));
+        assert!(!out.contains("adversarial"));
     }
 }

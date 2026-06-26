@@ -124,8 +124,8 @@ fn standard_commands() -> Vec<Command> {
     let defs: &[(&str, &str, &str)] = &[
         (
             "kickoff",
-            "Orient at the start of a session before deciding what to do.",
-            "Call the kickoff tool, then the next tool and the context tool. State the project's Vision, current phase, and nature, then propose the next concrete step. Before you start designing or implementing, check which of the project's practices and grown skills fit the task and use them. The kickoff tool bundles orientation: if no nature is set yet it returns a detected draft to propose to the human and set with profile.set after they confirm; for a brand-new project ask the human which named bundle fits and set it with profile.set. If you are adopting owox into an existing codebase, the kickoff tool also returns draft guardrails such as layers, boundaries, and irreversible operations — propose them to the human before adding any with canon.add. Do not read the canon files yourself; these tools return what you need.",
+            "Start kickoff and surface the next setup decision.",
+            "Call mission.start with type kickoff, then call next. If you need repo shape, call context with scope codebase. If you need change evidence, call context with scope diff. Present one unresolved setup decision with the recommended answer and reason. Do not read the canon files yourself.",
         ),
         (
             "req",
@@ -134,13 +134,13 @@ fn standard_commands() -> Vec<Command> {
         ),
         (
             "next",
-            "See what to decide next and which tasks are ready.",
-            "Call the next tool and report the open decisions to resolve and the tasks that are ready to start. Do not read the canon files yourself; the next tool returns this.",
+            "See the next decision or ready work.",
+            "Call next. If you need what changed, call context with scope diff. If you need a repo map before choosing files, call context with scope codebase. Do not read the canon files yourself.",
         ),
         (
             "status",
-            "Summarize where the project stands now.",
-            "Summarize the current state. Call the next tool for open decisions and ready tasks, and list pending human gates with gate.list. Do not read the canon files yourself.",
+            "Summarize current state and blockers.",
+            "Call next, then gate.list. Call verify.run too when the current check state matters. Do not read the canon files yourself.",
         ),
         (
             "decide",
@@ -149,13 +149,13 @@ fn standard_commands() -> Vec<Command> {
         ),
         (
             "verify",
-            "Check completion before finishing work.",
-            "Call verify.run and report completion in three kinds: work, requirement, and verification. Do not run the project's check scripts yourself; verify.run runs them and records the result.",
+            "Check completion before finishing.",
+            "Call verify.run and report work, requirement, and verification completion from that result. Do not run the project's checks yourself.",
         ),
         (
             "review",
-            "Review a change from several angles.",
-            "Review the current change. First call review.lenses to get the perspectives that apply to it, and call verify.run to take in what machines already checked; do not re-judge what verification, the quality bars, or the requirement trace already report. Then review through each applicable perspective in turn: correctness, design, security, alignment with existing conventions and assets, requirements, and unnecessary leftovers to prune. For each finding, confirm it against the actual code, then try to refute it from another angle and keep only what survives. Treat pruning as a proposal: never delete blindly, route any removal through the deletion policy and re-run verify.run, and send irreversible deletions to a human.",
+            "Review a change with the right lenses.",
+            "Call review.lenses, then verify.run, then context with scope diff. If structure is still unclear, call context with scope codebase. Review only what survives both confirmation and re-checking. Treat pruning as a proposal, not a blind delete.",
         ),
         (
             "task",
@@ -170,7 +170,7 @@ fn standard_commands() -> Vec<Command> {
         (
             "skill",
             "Grow and manage reusable skills.",
-            "Manage reusable skills with the skill tools: list them and their test and stage status with skill.list, register a draft with skill.register, promote a registered skill with skill.promote only after a human approves, and append a lesson with skill.remember. Author skill files under .owox/skills/. Do not create or register skills through other means.",
+            "Call skill.list first. When a repeated local routine is deterministic, testable, and secret-free, route it through skill.register and skill.promote; treat it as a script-oriented skill. Record lessons with skill.remember.",
         ),
         (
             "handoff",
