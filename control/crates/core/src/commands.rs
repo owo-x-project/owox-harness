@@ -160,7 +160,7 @@ fn standard_commands() -> Vec<Command> {
         (
             "task",
             "Manage work as verifiable tasks.",
-            "Manage work with the task tools: list ready work with task.list, create new work with task.create, and finish work with task.close, which requires verification to pass.",
+            "Manage work with the task tools: list ready work with task.list, create new work with task.create, and finish work with task.close, which requires verification to pass. If the area to touch is unclear before starting, call context with scope codebase.",
         ),
         (
             "issues",
@@ -173,9 +173,14 @@ fn standard_commands() -> Vec<Command> {
             "Call skill.list first. When a repeated local routine is deterministic, testable, and secret-free, route it through skill.register and skill.promote; treat it as a script-oriented skill. Record lessons with skill.remember.",
         ),
         (
+            "memo",
+            "Save a note to the right existing place by its content.",
+            "Save the note where it belongs; do not invent a new place. Classify by content: a durable judgment that must not be silently reversed goes to decision.record; the current task's working state goes to task.note; state that only matters on this branch goes to branch.note; a fact learned from investigation goes to knowledge.add; a lesson about a skill goes to skill.remember; a message meant for the next whole session goes through handoff. If the right place is unclear, ask the human which one before saving.",
+        ),
+        (
             "handoff",
             "Summarize state for the next session.",
-            "Produce a concise handoff: what changed, what is verified, the open decisions from the next tool, and the next step for the following session.",
+            "Produce a concise handoff for the following session. Call next for open gates, ready tasks, and stale items, verify.run for the current check state, context with scope diff for what changed, and branch.notes for branch-local notes. Summarize what changed, what is verified, the open decisions, ready tasks, branch notes, stale items, and the next step. Do not read the canon files yourself.",
         ),
     ];
     defs.iter()
@@ -208,9 +213,41 @@ mod tests {
         let names: Vec<_> = standard_commands().into_iter().map(|c| c.name).collect();
         for expected in [
             "kickoff", "next", "status", "decide", "verify", "review", "task", "skill", "handoff",
-            "req",
+            "req", "memo",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn memo_routes_to_existing_stores_without_new_store() {
+        // 「メモして」の唯一の分類役。新ストアを作らず既存 5 保存先 + handoff へ振る。
+        let memo = standard_commands()
+            .into_iter()
+            .find(|c| c.name == "memo")
+            .expect("memo command");
+        for store in [
+            "decision.record",
+            "task.note",
+            "branch.note",
+            "knowledge.add",
+            "skill.remember",
+        ] {
+            assert!(memo.body.contains(store), "memo が {store} へ振らない");
+        }
+        // 分類不能時は人間へ確認する。
+        assert!(memo.body.contains("ask the human"));
+    }
+
+    #[test]
+    fn handoff_pulls_from_live_sources() {
+        // 引き継ぎは会話ログでなく live ソースから組む (`docs/.../memo-伝言メモ不要.md`)。
+        let handoff = standard_commands()
+            .into_iter()
+            .find(|c| c.name == "handoff")
+            .expect("handoff command");
+        for src in ["next", "verify.run", "scope diff", "branch.notes"] {
+            assert!(handoff.body.contains(src), "handoff が {src} を使わない");
         }
     }
 
