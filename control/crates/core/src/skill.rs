@@ -100,6 +100,65 @@ impl Skill {
         }
         Ok(())
     }
+
+    /// 登録は可だが確認を促す助言 (warning) を集める。
+    ///
+    /// 3 条件:
+    /// 1. script があるのに tests が無い (implicit=false の明示 skill は登録可だが warning)
+    /// 2. script があるのに SKILL.md で script 名への言及が無い (draft 扱いにする)
+    /// 3. tests が script を呼んでいない (tests ファイル本文に script 名が現れない。簡易 grep)
+    ///
+    /// 条件2は stage を draft に下げるため registrable_shape の判定より後に評価する。
+    /// この関数は warning だけを返す (stage 降格は skill_status が担う)。
+    pub(crate) fn registration_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        if self.scripts.is_empty() {
+            // script が無ければ 3 条件すべて対象外。
+            return warnings;
+        }
+
+        // 条件1: script があるのに tests が無い (明示 skill = implicit=false のみ対象。
+        //        implicit=true は registrable_shape で既に弾く)。
+        if self.tests.is_empty() && !self.implicit {
+            warnings.push(
+                "scripts/ があるのに tests/ が無い。script の動作を最低限テストで保証することを推奨"
+                    .to_string(),
+            );
+        }
+
+        // 条件2: script があるのに SKILL.md で script 名への言及が無い。
+        // いずれの script 名も SKILL.md 本文に現れなければ draft 候補 (stage 降格は skill_status)。
+        let any_script_mentioned = self.scripts.iter().any(|s| {
+            let file_name = s.rel.split('/').next_back().unwrap_or(&s.rel);
+            self.skill_md.contains(file_name)
+        });
+        if !any_script_mentioned {
+            warnings.push(
+                "scripts/ があるのに SKILL.md に script 名の言及が無い。使い方を SKILL.md へ追記することを推奨 (draft 扱い)"
+                    .to_string(),
+            );
+        }
+
+        // 条件3: tests が script を呼んでいない (tests ファイル本文に script 名が現れない)。
+        if !self.tests.is_empty() {
+            for script in &self.scripts {
+                let file_name = script.rel.split('/').next_back().unwrap_or(&script.rel);
+                let test_calls_script = self.tests.iter().any(|test_path| {
+                    std::fs::read_to_string(test_path)
+                        .map(|content| content.contains(file_name))
+                        .unwrap_or(false)
+                });
+                if !test_calls_script {
+                    warnings.push(format!(
+                        "tests/ が {file_name} を呼んでいない可能性がある。テストで script を実行することを推奨"
+                    ));
+                }
+            }
+        }
+
+        warnings
+    }
 }
 
 /// スキル 1 件の状態。skill.list の可視化に使う 2 軸。
@@ -113,6 +172,8 @@ pub struct SkillStatus {
     pub tests: TestState,
     /// registrable_shape が返した不適格の理由 (あれば)。
     pub problem: Option<String>,
+    /// 登録ゲート追加助言 (warning)。登録は可だが人間が確認すべき点。
+    pub warnings: Vec<String>,
 }
 
 /// 昇格軸の状態。
@@ -393,8 +454,15 @@ pub fn skill_status(skill: &Skill, repo_root: &Path) -> SkillStatus {
         TestState::Failing
     };
 
-    // 登録可: 不適格でなく、テストが失敗していない (none か passing)。
-    let registrable = problem.is_none() && tests != TestState::Failing;
+    let warnings = skill.registration_warnings();
+
+    // SKILL.md に script 名の言及が無い場合は draft 扱い (warning の中から判断)。
+    let missing_skill_md_mention = warnings
+        .iter()
+        .any(|w| w.contains("SKILL.md に script 名の言及が無い"));
+
+    // 登録可: 不適格でなく、テストが失敗していない (none か passing) かつ draft 降格条件なし。
+    let registrable = problem.is_none() && tests != TestState::Failing && !missing_skill_md_mention;
     let stage = if registrable && skill.promoted {
         Stage::Promoted
     } else if registrable {
@@ -409,6 +477,7 @@ pub fn skill_status(skill: &Skill, repo_root: &Path) -> SkillStatus {
         stage,
         tests,
         problem,
+        warnings,
     }
 }
 
@@ -443,6 +512,7 @@ pub fn list_skills_envelope(owox_dir: &Path, repo_root: &Path) -> Envelope {
                 "stage": st.stage.as_str(),
                 "tests": st.tests.as_str(),
                 "problem": st.problem,
+                "warnings": st.warnings,
             })
         })
         .collect();
@@ -476,10 +546,22 @@ pub fn register_skill(owox_dir: &Path, repo_root: &Path, id: &str) -> Envelope {
     }
 
     match write_skills_to_targets(owox_dir, repo_root, &[skill]) {
-        Ok(written) => Envelope::ok(
-            format!("Registered skill {id} ({}).", status.stage.as_str()),
-            json!({ "id": id, "stage": status.stage.as_str(), "written": written }),
-        ),
+        Ok(written) => {
+            let mut env = Envelope::ok(
+                format!("Registered skill {id} ({}).", status.stage.as_str()),
+                json!({ "id": id, "stage": status.stage.as_str(), "written": written, "warnings": status.warnings }),
+            );
+            if !status.warnings.is_empty() {
+                env = env.with_next_actions(
+                    status
+                        .warnings
+                        .iter()
+                        .map(|w| format!("Warning: {w}"))
+                        .collect(),
+                );
+            }
+            env
+        }
         Err(err) => Envelope::failed(err),
     }
 }
@@ -929,5 +1011,103 @@ mod tests {
         assert_eq!(env.status, crate::envelope::Status::Ok);
         let skills = env.data.unwrap()["skills"].as_array().unwrap().len();
         assert_eq!(skills, 2);
+    }
+
+    // --- 追加テスト: 登録ゲート3助言 ---
+
+    /// script があるのに tests が無い明示 skill は warning 付きで登録可。
+    #[test]
+    fn explicit_skill_with_script_no_tests_registers_with_warning() {
+        let owox = tempdir();
+        let repo = owox.parent().unwrap();
+        // implicit=false (明示 skill)、script あり、tests なし。
+        let fm = "---\nname: t\ndescription: d\n---\n\nRun `scripts/run.sh`.\n";
+        make_skill(&owox, "explicit", fm, Some("implicit = false\n"), None);
+        write_script(&owox, "explicit", "run.sh");
+        let s = &load_skills(&owox).unwrap()[0];
+        let st = skill_status(s, repo);
+        // 登録可 (draft でない)。
+        assert_ne!(
+            st.stage,
+            Stage::Draft,
+            "明示 skill は scripts があっても登録可"
+        );
+        // warning が出る。
+        assert!(
+            st.warnings.iter().any(|w| w.contains("tests/")),
+            "scripts/ があるのに tests/ が無い旨の warning が必要: {:?}",
+            st.warnings
+        );
+    }
+
+    /// script があるのに SKILL.md で script 名への言及が無い場合は draft 扱いになる。
+    #[test]
+    fn script_not_mentioned_in_skill_md_is_draft() {
+        let owox = tempdir();
+        let repo = owox.parent().unwrap();
+        // SKILL.md に run.sh への言及なし。
+        let fm =
+            "---\nname: t\ndescription: d\n---\n\nDo something without mentioning the script.\n";
+        make_skill(&owox, "noref", fm, Some("implicit = false\n"), None);
+        write_script(&owox, "noref", "run.sh");
+        let s = &load_skills(&owox).unwrap()[0];
+        let st = skill_status(s, repo);
+        // draft 扱い。
+        assert_eq!(
+            st.stage,
+            Stage::Draft,
+            "SKILL.md に script 名の言及が無い場合は draft"
+        );
+        assert!(
+            st.warnings.iter().any(|w| w.contains("SKILL.md")),
+            "SKILL.md に script 名の言及が無い旨の warning が必要: {:?}",
+            st.warnings
+        );
+    }
+
+    /// tests が script を呼んでいない場合は warning が出る。
+    #[test]
+    fn tests_not_calling_script_yields_warning() {
+        let owox = tempdir();
+        let repo = owox.parent().unwrap();
+        // SKILL.md は run.sh を参照し、script も存在する。しかし tests は run.sh を呼ばない。
+        let fm = "---\nname: t\ndescription: d\n---\n\nRun `scripts/run.sh`.\n";
+        make_skill(&owox, "notcalling", fm, Some("implicit = false\n"), None);
+        write_script(&owox, "notcalling", "run.sh");
+        // tests ディレクトリを作り、run.sh を呼ばないテストを置く。
+        let tdir = owox.join("skills/notcalling/tests");
+        std::fs::create_dir_all(&tdir).unwrap();
+        let tpath = tdir.join("t.sh");
+        std::fs::write(&tpath, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tpath, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let s = &load_skills(&owox).unwrap()[0];
+        let st = skill_status(s, repo);
+        // warning が出る (run.sh を呼んでいない)。
+        assert!(
+            st.warnings.iter().any(|w| w.contains("run.sh")),
+            "tests が run.sh を呼んでいない旨の warning が必要: {:?}",
+            st.warnings
+        );
+    }
+
+    /// warnings は skill.list の出力にも含まれる。
+    #[test]
+    fn list_envelope_includes_warnings_field() {
+        let (repo, owox) = repo_and_owox();
+        // implicit=false、script あり、tests なし。
+        let fm = "---\nname: t\ndescription: d\n---\n\nRun `scripts/run.sh`.\n";
+        make_skill(&owox, "withwarn", fm, Some("implicit = false\n"), None);
+        write_script(&owox, "withwarn", "run.sh");
+        let env = list_skills_envelope(&owox, &repo);
+        let data = env.data.unwrap();
+        let skill_entry = &data["skills"].as_array().unwrap()[0];
+        assert!(
+            skill_entry.get("warnings").is_some(),
+            "skill.list の各エントリに warnings フィールドが必要"
+        );
     }
 }
