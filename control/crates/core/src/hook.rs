@@ -7,7 +7,6 @@ use std::path::Path;
 
 use crate::model::{Brand, Canon, Irreversible, Phase, Rules};
 use crate::quality::Quality;
-use crate::skill::Skill;
 
 /// 床コンテキスト。session 開始と圧縮後に AI へ注入する常時の地図。
 ///
@@ -58,34 +57,23 @@ pub fn floor_context(canon: &Canon) -> String {
     out
 }
 
-/// 育てたスキルの床注入 (能動提示)。session 開始時に「このプロジェクトで使える技」を先出しし、
-/// 着手前に該当を能動的に使うよう促す (`docs/decisions/20260619-承認と自動改善ループ.md`)。
+/// SessionStart 床コンテキストの Entry map が宣伝する tool 名の一覧。
 ///
-/// 床へは load_skills で読めるプロジェクト製スキルだけを出す (テストは走らせない・高速優先)。
-/// 名前と短い説明のみで膨らみを抑える。詳細・テスト状態は skill.list へ。空なら何も出さない。
-pub fn render_skills_section(skills: &[Skill]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("## Skills you can use\n\n");
-    out.push_str(
-        "Skills grown in this project. Before you design or implement, check which of these and which practices above fit the task, and use them. Promoted ones may auto-invoke; invoke a registered one by name. See skill.list for test status.\n",
-    );
-    for s in skills {
-        out.push_str("- ");
-        out.push_str(&s.name);
-        if s.promoted {
-            out.push_str(" [promoted]");
-        }
-        let desc = s.description.trim();
-        if !desc.is_empty() {
-            out.push_str(" — ");
-            out.push_str(desc);
-        }
-        out.push('\n');
-    }
-    out.push('\n');
-    out
+/// command_routing_findings (庭師の設計時配線検査) はこの一覧を真実源として、
+/// commands.toml のいずれかのコマンドから参照されているかを動的に検査する。
+/// floor_context の Entry map と必ず同期して更新すること。
+pub fn entry_map_tools() -> &'static [&'static str] {
+    &[
+        "kickoff",
+        "next",
+        "context",
+        "verify",
+        "review",
+        "skill",
+        "rules.lookup",
+        "glossary.lookup",
+        "practice.lookup",
+    ]
 }
 
 /// 注入する brand 本文 (`## Brand` ラベル配下)。語トリガ push が使う。
@@ -111,27 +99,45 @@ fn render_brand_block(brand: &Brand) -> Option<String> {
 
 /// rules に出すべき項目が 1 つでもあるか。
 fn has_rules(rules: &Rules) -> bool {
-    !(rules.common.is_empty()
-        && rules.initial.is_empty()
-        && rules.stable.is_empty()
-        && rules.maintenance.is_empty()
-        && rules.change_policy.is_empty()
-        && rules.dependency_policy.is_empty()
-        && rules.deletion_policy.is_empty()
-        && rules.safety.is_empty()
-        && rules.irreversible.is_empty()
-        && rules.human_gate.is_empty())
+    !rules.entries.is_empty() || !rules.irreversible.is_empty() || !rules.human_gate.is_empty()
 }
 
+/// phase でフィルタした時に出すべき項目が 1 つでもあるか。
 fn has_rules_for_phase(rules: &Rules, phase: Phase) -> bool {
-    !(rules.common.is_empty()
-        && rules.phase_rules(phase).is_empty()
-        && rules.change_policy.is_empty()
-        && rules.dependency_policy.is_empty()
-        && rules.deletion_policy.is_empty()
-        && rules.safety.is_empty()
-        && rules.irreversible.is_empty()
-        && rules.human_gate.is_empty())
+    rules
+        .entries
+        .iter()
+        .any(|e| e.phase.is_none() || e.phase == Some(phase))
+        || !rules.irreversible.is_empty()
+        || !rules.human_gate.is_empty()
+}
+
+/// entries をセクション別にグループ化して (section, items) のリストを返す。
+/// section が空の entries は "Common" 扱いとする。
+fn group_entries_by_section(entries: &[crate::model::RuleEntry]) -> Vec<(String, Vec<String>)> {
+    // セクション出現順を保ちつつグループ化する。
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in entries {
+        let sec = if e.section.is_empty() {
+            "Common".to_string()
+        } else {
+            e.section.clone()
+        };
+        if !groups.contains_key(&sec) {
+            order.push(sec.clone());
+            groups.insert(sec.clone(), Vec::new());
+        }
+        groups.get_mut(&sec).unwrap().push(e.text.clone());
+    }
+    order
+        .into_iter()
+        .map(|sec| {
+            let items = groups.remove(&sec).unwrap_or_default();
+            (sec, items)
+        })
+        .collect()
 }
 
 /// `- name: detail` を 1 行出す。detail が空なら name だけ。
@@ -145,71 +151,74 @@ fn push_pair(out: &mut String, name: &str, detail: &str) {
     out.push('\n');
 }
 
+/// 全 entries を出す (phase 不問)。`rules.lookup` の旧互換・テスト用。
 pub fn render_rules_block(rules: &Rules) -> String {
     if !has_rules(rules) {
         return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
     }
     let mut out = String::from("## Rules\n\nThe project's rules. Follow them.\n\n");
-    render_sublist(&mut out, "Common", &rules.common);
-    render_sublist(&mut out, "Initial", &rules.initial);
-    render_sublist(&mut out, "Stable", &rules.stable);
-    render_sublist(&mut out, "Maintenance", &rules.maintenance);
-    render_sublist(&mut out, "Change policy", &rules.change_policy);
-    render_sublist(&mut out, "Dependency policy", &rules.dependency_policy);
-    render_sublist(&mut out, "Deletion policy", &rules.deletion_policy);
-    render_sublist(&mut out, "Safety", &rules.safety);
-
-    if !rules.irreversible.is_empty() {
-        out.push_str("### Irreversible operations\n\n");
-        out.push_str("Confirm with a human before doing any of these.\n\n");
-        for op in &rules.irreversible {
-            push_pair(&mut out, &op.operation, &op.reason);
-        }
-        out.push('\n');
+    for (sec, items) in group_entries_by_section(&rules.entries) {
+        render_sublist(&mut out, &sec, &items);
     }
-    if !rules.human_gate.is_empty() {
-        out.push_str("### Hand back to a human\n\n");
-        for gate in &rules.human_gate {
-            push_pair(&mut out, &gate.situation, &gate.reason);
-        }
-        out.push('\n');
-    }
+    render_irreversible_and_gates(&mut out, rules);
     out
 }
 
+/// 現在 phase (common + 指定 phase) の entries だけを出す。`rules.lookup` と `policy_injection` の真実源。
 pub fn render_rules_block_for_phase(rules: &Rules, phase: Phase) -> String {
     if !has_rules_for_phase(rules, phase) {
         return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
     }
+    let filtered: Vec<&crate::model::RuleEntry> = rules
+        .entries
+        .iter()
+        .filter(|e| e.phase.is_none() || e.phase == Some(phase))
+        .collect();
     let mut out =
         String::from("## Rules\n\nThe project's rules for the current phase. Follow them.\n\n");
-    render_sublist(&mut out, "Common", &rules.common);
-    match phase {
-        Phase::Initial => render_sublist(&mut out, "Initial", &rules.initial),
-        Phase::Stable => render_sublist(&mut out, "Stable", &rules.stable),
-        Phase::Maintenance => render_sublist(&mut out, "Maintenance", &rules.maintenance),
-    }
-    render_sublist(&mut out, "Change policy", &rules.change_policy);
-    render_sublist(&mut out, "Dependency policy", &rules.dependency_policy);
-    render_sublist(&mut out, "Deletion policy", &rules.deletion_policy);
-    render_sublist(&mut out, "Safety", &rules.safety);
 
+    // セクション別グループ化 (出現順)。
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in &filtered {
+        let sec = if e.section.is_empty() {
+            "Common".to_string()
+        } else {
+            e.section.clone()
+        };
+        if !groups.contains_key(&sec) {
+            order.push(sec.clone());
+            groups.insert(sec.clone(), Vec::new());
+        }
+        groups.get_mut(&sec).unwrap().push(e.text.clone());
+    }
+    for sec in order {
+        let items = groups.remove(&sec).unwrap_or_default();
+        render_sublist(&mut out, &sec, &items);
+    }
+
+    render_irreversible_and_gates(&mut out, rules);
+    out
+}
+
+/// Irreversible operations と Human gates を共通レンダリング。
+fn render_irreversible_and_gates(out: &mut String, rules: &Rules) {
     if !rules.irreversible.is_empty() {
         out.push_str("### Irreversible operations\n\n");
         out.push_str("Confirm with a human before doing any of these.\n\n");
         for op in &rules.irreversible {
-            push_pair(&mut out, &op.operation, &op.reason);
+            push_pair(out, &op.operation, &op.reason);
         }
         out.push('\n');
     }
     if !rules.human_gate.is_empty() {
         out.push_str("### Hand back to a human\n\n");
         for gate in &rules.human_gate {
-            push_pair(&mut out, &gate.situation, &gate.reason);
+            push_pair(out, &gate.situation, &gate.reason);
         }
         out.push('\n');
     }
-    out
 }
 
 /// `## title` 配下へ `- item` を並べる。空なら節ごと出さない。
@@ -353,6 +362,7 @@ const BRAND_TRIGGERS: &[&str] = &[
 /// 一致ゼロ・全て注入済みなら None (素通り)。照合は大文字小文字を無視した部分一致。
 pub fn policy_injection(
     canon: &Canon,
+    phase: Phase,
     text: &str,
     already: &std::collections::HashSet<String>,
     force_rules: bool,
@@ -362,8 +372,8 @@ pub fn policy_injection(
     let mut keys = Vec::new();
 
     let want_rules = force_rules || RULES_TRIGGERS.iter().any(|k| lower.contains(k));
-    if want_rules && !already.contains(RULES_KEY) && has_rules(&canon.rules) {
-        out.push_str(&render_rules_block(&canon.rules));
+    if want_rules && !already.contains(RULES_KEY) && has_rules_for_phase(&canon.rules, phase) {
+        out.push_str(&render_rules_block_for_phase(&canon.rules, phase));
         keys.push(RULES_KEY.to_string());
     }
 
@@ -1635,6 +1645,7 @@ mod tests {
                     text: "newest practice".into(),
                 },
             ],
+            rule_entries: vec![],
         };
         let out = floor_context(&canon);
         assert!(!out.contains("## Glossary terms"));
@@ -1693,6 +1704,7 @@ mod tests {
                 date: "20260614".to_string(),
                 text: "always add a regression test".to_string(),
             }],
+            rule_entries: vec![],
         };
         let out = floor_context(&canon);
         assert!(out.contains("practice.lookup"));
@@ -1700,26 +1712,47 @@ mod tests {
         assert!(!out.contains("always add a regression test"));
     }
 
+    /// テスト用: entries に 1 つのエントリを追加するヘルパ。
+    fn push_rule_entry(rules: &mut crate::model::Rules, section: &str, text: &str) {
+        rules.entries.push(crate::model::RuleEntry {
+            phase: None,
+            section: section.to_string(),
+            triggers: Vec::new(),
+            operations: Vec::new(),
+            paths: Vec::new(),
+            text: text.to_string(),
+        });
+    }
+
     /// policy_injection: rules 語が出たら `## Rules` 本文を push し、出ていなければ素通り。
     #[test]
     fn policy_injects_rules_on_trigger_word() {
         let mut canon = canon_with_glossary(&[]);
-        canon.rules.deletion_policy = vec!["keep history".to_string()];
+        push_rule_entry(&mut canon.rules, "Deletion policy", "keep history");
         // 「delete」で rules を push。
-        let inj = policy_injection(&canon, "can I delete this file?", &none_set(), false).unwrap();
+        let inj = policy_injection(
+            &canon,
+            Phase::Initial,
+            "can I delete this file?",
+            &none_set(),
+            false,
+        )
+        .unwrap();
         assert!(inj.context.contains("## Rules"));
         assert!(inj.context.contains("keep history"));
         assert_eq!(inj.keys, vec!["policy:rules".to_string()]);
         // 無関係なプロンプトでは出さない。
-        assert!(policy_injection(&canon, "run the tests", &none_set(), false).is_none());
+        assert!(
+            policy_injection(&canon, Phase::Initial, "run the tests", &none_set(), false).is_none()
+        );
     }
 
     /// policy_injection: force_rules=true なら語に関わらず rules を届ける (編集直前の経路)。
     #[test]
     fn policy_force_rules_injects_without_word() {
         let mut canon = canon_with_glossary(&[]);
-        canon.rules.safety = vec!["no secrets in logs".to_string()];
-        let inj = policy_injection(&canon, "", &none_set(), true).unwrap();
+        push_rule_entry(&mut canon.rules, "Safety", "no secrets in logs");
+        let inj = policy_injection(&canon, Phase::Initial, "", &none_set(), true).unwrap();
         assert!(inj.context.contains("no secrets in logs"));
     }
 
@@ -1727,10 +1760,12 @@ mod tests {
     #[test]
     fn policy_skips_already_injected() {
         let mut canon = canon_with_glossary(&[]);
-        canon.rules.change_policy = vec!["small diffs".to_string()];
+        push_rule_entry(&mut canon.rules, "Change policy", "small diffs");
         let already: std::collections::HashSet<String> =
             ["policy:rules".to_string()].into_iter().collect();
-        assert!(policy_injection(&canon, "change the rule", &already, true).is_none());
+        assert!(
+            policy_injection(&canon, Phase::Initial, "change the rule", &already, true).is_none()
+        );
     }
 
     /// policy_injection: brand 語で brand リストを push。Vision・全体スタイルは含めない。
@@ -1739,8 +1774,14 @@ mod tests {
         let mut canon = canon_with_glossary(&[]);
         canon.brand.values = vec!["honesty".to_string()];
         canon.brand.style = vec!["short sentences".to_string()];
-        let inj =
-            policy_injection(&canon, "what are the project values?", &none_set(), false).unwrap();
+        let inj = policy_injection(
+            &canon,
+            Phase::Initial,
+            "what are the project values?",
+            &none_set(),
+            false,
+        )
+        .unwrap();
         assert!(inj.context.contains("## Brand"));
         assert!(inj.context.contains("honesty"));
         // 全体スタイルは床に常時なので brand ブロックへ重複させない。
@@ -1827,38 +1868,6 @@ mod tests {
         assert!(!out.contains("Response language"));
     }
 
-    fn skill_fixture(name: &str, promoted: bool) -> Skill {
-        Skill {
-            id: name.to_string(),
-            name: name.to_string(),
-            description: format!("when {name} fits"),
-            skill_md: String::new(),
-            implicit: true,
-            promoted,
-            human_gate: false,
-            tests: Vec::new(),
-            scripts: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn skills_section_empty_when_no_skills() {
-        // 育てたスキルが無い時は床へ何も足さない (膨らみ防止)。
-        assert!(render_skills_section(&[]).is_empty());
-    }
-
-    #[test]
-    fn skills_section_lists_and_tags_promoted() {
-        let skills = vec![skill_fixture("tidy", false), skill_fixture("release", true)];
-        let out = render_skills_section(&skills);
-        assert!(out.contains("## Skills you can use"));
-        // 登録のみは素名・昇格は [promoted] タグ付き。
-        assert!(out.contains("- tidy — when tidy fits"));
-        assert!(out.contains("- release [promoted] — when release fits"));
-        // 着手前に該当を能動的に使う促し。
-        assert!(out.contains("Before you design or implement"));
-    }
-
     /// オーケストレーション節は床から外す。
     #[test]
     fn floor_omits_orchestration_section() {
@@ -1866,5 +1875,42 @@ mod tests {
         assert!(!out.contains("## Orchestration"));
         assert!(!out.contains("investigate"));
         assert!(!out.contains("adversarial"));
+    }
+
+    /// policy_injection は現在 phase のエントリのみ出す。他 phase のエントリは漏れない。
+    #[test]
+    fn policy_injection_filters_to_current_phase() {
+        let mut canon = canon_with_glossary(&[]);
+        // Initial phase のエントリ
+        canon.rules.entries.push(crate::model::RuleEntry {
+            phase: Some(Phase::Initial),
+            section: "Initial only".to_string(),
+            triggers: Vec::new(),
+            operations: Vec::new(),
+            paths: Vec::new(),
+            text: "initial-phase-rule".to_string(),
+        });
+        // Stable phase のエントリ
+        canon.rules.entries.push(crate::model::RuleEntry {
+            phase: Some(Phase::Stable),
+            section: "Stable only".to_string(),
+            triggers: Vec::new(),
+            operations: Vec::new(),
+            paths: Vec::new(),
+            text: "stable-phase-rule".to_string(),
+        });
+
+        // force_rules=true で Initial を要求
+        let inj = policy_injection(&canon, Phase::Initial, "", &none_set(), true).unwrap();
+        assert!(
+            inj.context.contains("initial-phase-rule"),
+            "Initial rule は出るはず: {}",
+            inj.context
+        );
+        assert!(
+            !inj.context.contains("stable-phase-rule"),
+            "Stable rule は漏れないはず: {}",
+            inj.context
+        );
     }
 }

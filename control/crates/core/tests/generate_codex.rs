@@ -4,7 +4,7 @@
 //! SessionStart / PostCompact hook が live 注入する。rules 本文と brand リストはオンデマンド注入。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use owox_core::{
     HookDecision, find, floor_context, load_canon, policy_injection, pre_tool_use_decision,
@@ -18,18 +18,6 @@ fn fixtures() -> PathBuf {
 
 fn fixture_owox() -> PathBuf {
     fixtures().join("minimal/.owox")
-}
-
-/// 指定 owox から生成し、目的のファイル内容を返す。無ければ空文字。
-fn generated(owox: &Path, path: &str) -> String {
-    let canon = load_canon(owox).expect("正本を読める");
-    find("codex")
-        .expect("codex target")
-        .generate(&canon)
-        .into_iter()
-        .find(|f| f.path == path)
-        .map(|f| f.contents)
-        .unwrap_or_default()
 }
 
 #[test]
@@ -160,14 +148,29 @@ fn rules_block_renders_on_demand_without_detect() {
 fn prompt_word_pushes_rules_block() {
     // ユーザーが tool 名や「rules」を言わなくても、関連語で本文が届く。
     let canon = load_canon(&fixtures().join("withrules/.owox")).expect("正本を読める");
-    let inj = policy_injection(&canon, "can I delete this file?", &HashSet::new(), false)
-        .expect("delete で rules を push");
+    let inj = policy_injection(
+        &canon,
+        canon.state.phase,
+        "can I delete this file?",
+        &HashSet::new(),
+        false,
+    )
+    .expect("delete で rules を push");
     assert!(inj.context.contains("## Rules"));
     assert!(inj.context.contains("Generated artifacts may be deleted"));
     assert_eq!(inj.keys, vec!["policy:rules".to_string()]);
 
     // 無関係なプロンプトでは押し付けない (最小コンテキスト)。
-    assert!(policy_injection(&canon, "just say hello", &HashSet::new(), false).is_none());
+    assert!(
+        policy_injection(
+            &canon,
+            canon.state.phase,
+            "just say hello",
+            &HashSet::new(),
+            false
+        )
+        .is_none()
+    );
 }
 
 #[test]
