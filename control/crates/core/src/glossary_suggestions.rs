@@ -172,12 +172,13 @@ fn extract_term_hits_from_text(path: &str, text: &str, source: &str) -> Vec<Glos
     let mut hits = Vec::new();
     for line in text.lines() {
         let mut seen = BTreeSet::new();
-        let mut tokens = Vec::new();
-        for token in re.find_iter(line) {
-            let Some(term) = normalize_token(token.as_str()) else {
+        // phrase_tokens: フレーズ組み立て用。normalize_token の結果に依らず全トークンを収集。
+        let phrase_tokens: Vec<String> =
+            re.find_iter(line).map(|m| m.as_str().to_string()).collect();
+        for raw in &phrase_tokens {
+            let Some(term) = normalize_token(raw) else {
                 continue;
             };
-            tokens.push(token.as_str().to_string());
             if !seen.insert(term.clone()) {
                 continue;
             }
@@ -187,7 +188,7 @@ fn extract_term_hits_from_text(path: &str, text: &str, source: &str) -> Vec<Glos
                 example: path.to_string(),
             });
         }
-        for pair in tokens.windows(2) {
+        for pair in phrase_tokens.windows(2) {
             let phrase = candidate_phrase(&pair[0], &pair[1]);
             let Some(term) = phrase.and_then(|phrase| normalize_token(&phrase)) else {
                 continue;
@@ -268,7 +269,10 @@ fn normalize_token(token: &str) -> Option<String> {
     if is_path_like(&lower) {
         return None;
     }
-    if is_camel_token(trimmed) && is_lower_snake_or_kebab(trimmed) {
+    if !is_camel_token(trimmed)
+        && !is_lower_snake_or_kebab(trimmed)
+        && trimmed.chars().all(|c| c.is_ascii_alphabetic())
+    {
         return None;
     }
     Some(trimmed.to_string())
@@ -423,6 +427,58 @@ mod tests {
             }],
         );
         assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn camel_and_snake_tokens_are_candidate_eligible() {
+        let owox = std::env::temp_dir().join("owox-glossary-suggestions-camel-test");
+        let _ = std::fs::remove_dir_all(&owox);
+        std::fs::create_dir_all(&owox).unwrap();
+        let suggestions = suggest_terms(
+            &owox,
+            &[
+                GlossaryScanText {
+                    path: "docs/a.md".to_string(),
+                    text: "TargetHarness is used here for testing.\n".to_string(),
+                },
+                GlossaryScanText {
+                    path: "docs/b.md".to_string(),
+                    text: "TargetHarness appears again in this document.\n".to_string(),
+                },
+            ],
+        );
+        assert!(
+            suggestions.iter().any(|s| s.term == "TargetHarness"),
+            "TargetHarness should be a candidate, got: {:?}",
+            suggestions.iter().map(|s| &s.term).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn snake_case_token_is_candidate_eligible() {
+        let owox = std::env::temp_dir().join("owox-glossary-suggestions-snake-test");
+        let _ = std::fs::remove_dir_all(&owox);
+        std::fs::create_dir_all(&owox).unwrap();
+        let suggestions = suggest_terms(
+            &owox,
+            &[
+                GlossaryScanText {
+                    path: "crates/a.rs".to_string(),
+                    text: "let x = owox_session_cache;\nuse owox_session_cache;\n".to_string(),
+                },
+                GlossaryScanText {
+                    path: "crates/b.rs".to_string(),
+                    text: "fn owox_session_cache() {}\n".to_string(),
+                },
+            ],
+        );
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.term.contains("owox_session_cache")),
+            "owox_session_cache should be a candidate, got: {:?}",
+            suggestions.iter().map(|s| &s.term).collect::<Vec<_>>()
+        );
     }
 
     #[test]

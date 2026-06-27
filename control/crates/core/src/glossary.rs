@@ -79,16 +79,24 @@ pub fn lookup(owox_dir: &Path, term: &str) -> Envelope {
         Err(err) => return Envelope::failed(err),
     };
     match find_term(&glossary, term) {
-        Some(entry) => Envelope::ok(
-            format!("Definition of {}.", entry.term),
-            json!({
-                "found": true,
-                "match": "exact",
-                "term": entry.term,
-                "aliases": entry.aliases,
-                "definition": entry.definition
-            }),
-        ),
+        Some(entry) => {
+            let lower = term.trim().to_lowercase();
+            let match_kind = if entry.term.to_lowercase() == lower {
+                "exact"
+            } else {
+                "alias"
+            };
+            Envelope::ok(
+                format!("Definition of {}.", entry.term),
+                json!({
+                    "found": true,
+                    "match": match_kind,
+                    "term": entry.term,
+                    "aliases": entry.aliases,
+                    "definition": entry.definition
+                }),
+            )
+        }
         None => {
             let candidates: Vec<_> = partial_candidates(&glossary, term)
                 .iter()
@@ -281,10 +289,16 @@ mod tests {
             .status,
             Status::Ok
         );
-        // 別名でも正規名でも引ける。返るのは正規名の定義。
-        for q in ["target harness", "th", "Harness Output"] {
+        // 正規名は match:"exact"、別名は match:"alias"。
+        let data = lookup(&owox, "target harness").data.unwrap();
+        assert_eq!(data["found"], true);
+        assert_eq!(data["match"], "exact");
+        assert_eq!(data["term"], "target harness");
+        assert_eq!(data["definition"], "generated files");
+        for q in ["th", "Harness Output"] {
             let data = lookup(&owox, q).data.unwrap();
             assert_eq!(data["found"], true, "{q} で引けない");
+            assert_eq!(data["match"], "alias", "{q} は alias 一致のはず");
             assert_eq!(data["term"], "target harness");
             assert_eq!(data["definition"], "generated files");
         }
