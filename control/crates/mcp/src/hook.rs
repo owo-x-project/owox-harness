@@ -663,7 +663,10 @@ fn session_start() -> ExitCode {
     context.push_str(&current_pressure_line(&owox, &canon));
     if let Ok(selection) = owox_core::select_delivery_for_phase(
         &owox,
-        owox_core::DeliveryRequest::session_start(canon.state.phase),
+        owox_core::DeliveryRequest::session_start_with_limit(
+            canon.state.phase,
+            canon.quality.delivery.always_limit,
+        ),
         canon.state.phase,
     ) {
         let block = owox_core::render_delivery_block(&selection);
@@ -1193,7 +1196,7 @@ fn is_delete_command(command: &str) -> bool {
 fn path_derived_operations(paths: &[String]) -> Vec<owox_core::DeliveryOperation> {
     let mut out = Vec::new();
     for path in paths {
-        if is_dependency_path(path) {
+        if owox_core::is_dependency_path(path) {
             push_unique(&mut out, owox_core::DeliveryOperation::DependencyChange);
         }
         if path.starts_with(".owox/requirements/") {
@@ -1207,21 +1210,6 @@ fn path_derived_operations(paths: &[String]) -> Vec<owox_core::DeliveryOperation
         }
     }
     out
-}
-
-fn is_dependency_path(path: &str) -> bool {
-    matches!(
-        path,
-        "Cargo.toml"
-            | "Cargo.lock"
-            | "package.json"
-            | "package-lock.json"
-            | "pnpm-lock.yaml"
-            | "pyproject.toml"
-            | "requirements.txt"
-            | "go.mod"
-            | "go.sum"
-    )
 }
 
 fn is_rules_path(path: &str) -> bool {

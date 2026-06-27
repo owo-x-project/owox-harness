@@ -117,7 +117,26 @@ pub fn changed_files(work_dir: &Path) -> Vec<String> {
 }
 
 /// `main` 系統との共通祖先。見つからない時は `HEAD` へ退避する。
+///
+/// 優先順: 現在ブランチの上流追跡 (@{upstream}) → origin/main → main → HEAD。
+/// DiffBase.name はどの基準を使ったかを示す。
 pub fn main_merge_base(work_dir: &Path) -> DiffBase {
+    // 上流追跡が設定されていればそれを最優先する。
+    if let Some(upstream) = git_value(
+        work_dir,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) && let Some(rev) = git_value(work_dir, &["merge-base", "HEAD", &upstream])
+    {
+        return DiffBase {
+            name: format!("merge-base({upstream}, HEAD)"),
+            rev,
+        };
+    }
     for candidate in ["origin/main", "main"] {
         if git_value(work_dir, &["rev-parse", "--verify", candidate]).is_none() {
             continue;
@@ -478,5 +497,30 @@ mod tests {
         assert_eq!(parsed[0].path, "new/path.rs");
         assert_eq!(parsed[1].status, ChangeStatus::Deleted);
         assert_eq!(parsed[1].kind, FileKind::Docs);
+    }
+
+    #[test]
+    fn is_canon_surface_true_for_canon_and_docs() {
+        // FileKind::is_canon_surface は Canon と Docs だけ true。
+        assert!(FileKind::Canon.is_canon_surface());
+        assert!(FileKind::Docs.is_canon_surface());
+        assert!(!FileKind::Source.is_canon_surface());
+        assert!(!FileKind::Test.is_canon_surface());
+        assert!(!FileKind::Config.is_canon_surface());
+        assert!(!FileKind::Generated.is_canon_surface());
+        assert!(!FileKind::Unknown.is_canon_surface());
+    }
+
+    #[test]
+    fn main_merge_base_falls_back_to_head_in_non_git_dir() {
+        // git リポジトリでない一時ディレクトリでは HEAD フォールバックになる。
+        let tmp = std::env::temp_dir().join(format!("owox-files-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = super::main_merge_base(&tmp);
+        // non-git なら name="HEAD", rev="HEAD"。
+        assert_eq!(base.name, "HEAD");
+        assert_eq!(base.rev, "HEAD");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
