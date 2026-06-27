@@ -181,16 +181,67 @@ pub fn select_lenses(lenses: &[Lens], changed_files: &[String]) -> Vec<Lens> {
         .collect()
 }
 
+/// 正本面強化が必要な観点 ID。canon 面変更があれば先頭に並べて強調する。
+pub const CANON_EMPHASIS_IDS: &[&str] = &["requirement", "plan-alignment", "design"];
+
+/// 正本面の変更がある時、指定観点 (requirement / plan-alignment / design) を
+/// 先頭に並べて強調マークと理由を付ける。全観点の選択は変わらない (重み付けのみ)。
+///
+/// canon面変更なしの時は従来順・非強調のまま返す。
+pub fn apply_canon_emphasis(
+    selected: Vec<Lens>,
+    has_canon_changes: bool,
+) -> Vec<(Lens, bool, Option<&'static str>)> {
+    if !has_canon_changes {
+        return selected.into_iter().map(|l| (l, false, None)).collect();
+    }
+    // 強調対象を先頭に、その他を後ろに並べ替え。
+    let (mut emphasized, rest): (Vec<_>, Vec<_>) = selected
+        .into_iter()
+        .partition(|l| CANON_EMPHASIS_IDS.contains(&l.id.as_str()));
+    // 指定順序に並べ替え (requirement → plan-alignment → design)。
+    emphasized.sort_by_key(|l| {
+        CANON_EMPHASIS_IDS
+            .iter()
+            .position(|id| *id == l.id.as_str())
+            .unwrap_or(usize::MAX)
+    });
+    emphasized
+        .into_iter()
+        .map(|l| (l, true, Some("Canon surface changed.")))
+        .chain(rest.into_iter().map(|l| (l, false, None)))
+        .collect()
+}
+
 /// review.lenses tool。今の変更に適用される観点を機械選択して封筒で返す。
-pub fn review_lenses_envelope(owox_dir: &Path, changed_files: &[String]) -> Envelope {
+///
+/// `has_canon_changes`: 差分に正本面 (Canon|Docs) の変更が含まれるか。
+/// true の時 requirement / plan-alignment / design を先頭に強調して返す。
+pub fn review_lenses_envelope(
+    owox_dir: &Path,
+    changed_files: &[String],
+    has_canon_changes: bool,
+) -> Envelope {
     let lenses = match load_lenses(owox_dir) {
         Ok(l) => l,
         Err(err) => return Envelope::failed(err),
     };
     let selected = select_lenses(&lenses, changed_files);
-    let list: Vec<_> = selected
+    let annotated = apply_canon_emphasis(selected, has_canon_changes);
+    let list: Vec<_> = annotated
         .iter()
-        .map(|l| json!({ "id": l.id, "description": l.description }))
+        .map(|(l, emphasis, reason)| {
+            if *emphasis {
+                json!({
+                    "id": l.id,
+                    "description": l.description,
+                    "emphasis": true,
+                    "emphasis_reason": reason.unwrap_or(""),
+                })
+            } else {
+                json!({ "id": l.id, "description": l.description })
+            }
+        })
         .collect();
     Envelope::ok(
         format!(
@@ -298,11 +349,135 @@ mod tests {
     #[test]
     fn envelope_reports_applicable_lenses() {
         let owox = tempdir();
-        let env = review_lenses_envelope(&owox, &["Cargo.toml".to_string()]);
+        let env = review_lenses_envelope(&owox, &["Cargo.toml".to_string()], false);
         let data = env.data.unwrap();
         let lenses = data["lenses"].as_array().unwrap();
         let names: Vec<_> = lenses.iter().map(|l| l["id"].as_str().unwrap()).collect();
         assert!(names.contains(&"dependency"));
         assert!(names.contains(&"correctness"));
+    }
+
+    // --- canon 強調テスト ---
+
+    #[test]
+    fn canon_emphasis_reorders_and_marks_when_canon_changed() {
+        let lenses = standard_lenses()
+            .into_iter()
+            .filter(|l| l.when == Applicability::Always)
+            .collect::<Vec<_>>();
+        let annotated = apply_canon_emphasis(lenses, true);
+        // 先頭3件が強調対象 (requirement, plan-alignment, design)。
+        let first_ids: Vec<_> = annotated
+            .iter()
+            .take(3)
+            .map(|(l, _, _)| l.id.as_str())
+            .collect();
+        assert_eq!(
+            first_ids, CANON_EMPHASIS_IDS,
+            "先頭順が requirement/plan-alignment/design でない"
+        );
+        // 強調フラグと理由が付く。
+        for (l, emphasis, reason) in annotated.iter().take(3) {
+            assert!(*emphasis, "{} に emphasis が付いていない", l.id);
+            assert_eq!(
+                *reason,
+                Some("Canon surface changed."),
+                "{} の reason が違う",
+                l.id
+            );
+        }
+        // 残りは非強調。
+        for (l, emphasis, _) in annotated.iter().skip(3) {
+            assert!(!emphasis, "{} に誤って emphasis が付いている", l.id);
+        }
+    }
+
+    #[test]
+    fn canon_emphasis_preserves_all_lenses_when_canon_changed() {
+        let lenses = standard_lenses()
+            .into_iter()
+            .filter(|l| l.when == Applicability::Always)
+            .collect::<Vec<_>>();
+        let count = lenses.len();
+        let annotated = apply_canon_emphasis(lenses, true);
+        // 全観点が保持される (選択ゲートでない)。
+        assert_eq!(annotated.len(), count, "観点数が変わった");
+    }
+
+    #[test]
+    fn canon_emphasis_no_reorder_when_no_canon_changes() {
+        let lenses = standard_lenses()
+            .into_iter()
+            .filter(|l| l.when == Applicability::Always)
+            .collect::<Vec<_>>();
+        let original_ids: Vec<_> = lenses.iter().map(|l| l.id.clone()).collect();
+        let annotated = apply_canon_emphasis(lenses, false);
+        let result_ids: Vec<_> = annotated.iter().map(|(l, _, _)| l.id.clone()).collect();
+        assert_eq!(result_ids, original_ids, "非強調時に順序が変わった");
+        // 全て非強調。
+        for (_, emphasis, _) in &annotated {
+            assert!(!emphasis, "canon変更無しなのに emphasis が付いている");
+        }
+    }
+
+    #[test]
+    fn envelope_canon_changed_puts_emphasis_in_json() {
+        let owox = tempdir();
+        // docs/ のファイルが正本面扱いになる想定で、has_canon_changes=true を渡す。
+        let env = review_lenses_envelope(
+            &owox,
+            &[
+                "docs/requirements/x.md".to_string(),
+                "src/lib.rs".to_string(),
+            ],
+            true,
+        );
+        let data = env.data.unwrap();
+        let lenses = data["lenses"].as_array().unwrap();
+        // 先頭3件が強調対象 ID であること。
+        let first_ids: Vec<_> = lenses
+            .iter()
+            .take(3)
+            .map(|l| l["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(first_ids, CANON_EMPHASIS_IDS, "先頭順が違う");
+        // 先頭3件に emphasis: true と emphasis_reason が付く。
+        for lens_val in lenses.iter().take(3) {
+            assert_eq!(
+                lens_val["emphasis"].as_bool(),
+                Some(true),
+                "{} に emphasis が無い",
+                lens_val["id"]
+            );
+            assert_eq!(
+                lens_val["emphasis_reason"].as_str(),
+                Some("Canon surface changed."),
+                "{} の emphasis_reason が違う",
+                lens_val["id"]
+            );
+        }
+        // 残りに emphasis フィールドが無い。
+        for lens_val in lenses.iter().skip(3) {
+            assert!(
+                lens_val.get("emphasis").is_none(),
+                "{} に不要な emphasis がある",
+                lens_val["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_no_canon_changes_no_emphasis() {
+        let owox = tempdir();
+        let env = review_lenses_envelope(&owox, &["src/lib.rs".to_string()], false);
+        let data = env.data.unwrap();
+        let lenses = data["lenses"].as_array().unwrap();
+        for lens_val in lenses {
+            assert!(
+                lens_val.get("emphasis").is_none(),
+                "{} に不要な emphasis がある",
+                lens_val["id"]
+            );
+        }
     }
 }
