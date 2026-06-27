@@ -248,6 +248,87 @@ pub fn run_practice_redundancy(
     findings
 }
 
+/// rules の冗長性を検出する。
+///
+/// rules の全フィールドを平坦化した String スライスに対して、practice と同じ字 n-gram (3-gram)
+/// Jaccard 類似度を使い、閾値超えを kind="duplicate-rule" として報告する。
+/// 新たな類似アルゴリズムは発明せず、run_practice_redundancy と同じ char_ngrams / jaccard を流用。
+/// is_structural()=false なので commit を止めない (advisory)。
+pub fn run_rules_redundancy(rules: &crate::model::Rules, min_similarity: f64) -> Vec<DecayFinding> {
+    // 全フィールドを平坦化して (テキスト, セクション名) ペアにする。
+    // irreversible / human_gate は構造が異なるため対象外。
+    let entries: Vec<(&str, &str)> = rules
+        .common
+        .iter()
+        .map(|s| (s.as_str(), "common"))
+        .chain(rules.initial.iter().map(|s| (s.as_str(), "initial")))
+        .chain(rules.stable.iter().map(|s| (s.as_str(), "stable")))
+        .chain(
+            rules
+                .maintenance
+                .iter()
+                .map(|s| (s.as_str(), "maintenance")),
+        )
+        .chain(
+            rules
+                .change_policy
+                .iter()
+                .map(|s| (s.as_str(), "change_policy")),
+        )
+        .chain(
+            rules
+                .dependency_policy
+                .iter()
+                .map(|s| (s.as_str(), "dependency_policy")),
+        )
+        .chain(
+            rules
+                .deletion_policy
+                .iter()
+                .map(|s| (s.as_str(), "deletion_policy")),
+        )
+        .chain(rules.safety.iter().map(|s| (s.as_str(), "safety")))
+        .collect();
+
+    let grams: Vec<std::collections::BTreeSet<String>> = entries
+        .iter()
+        .map(|(text, _)| char_ngrams(text, 3))
+        .collect();
+    let mut findings = Vec::new();
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let sim = jaccard(&grams[i], &grams[j]);
+            if sim >= min_similarity {
+                findings.push(DecayFinding {
+                    kind: "duplicate-rule",
+                    subject: format!("rule [{}/{}]", entries[j].1, short_rule(entries[j].0)),
+                    detail: format!(
+                        "looks {}% similar to rule [{}/{}]; consider merging via canon.propose",
+                        (sim * 100.0).round() as u32,
+                        entries[i].1,
+                        short_rule(entries[i].0)
+                    ),
+                });
+            }
+        }
+    }
+    findings
+}
+
+/// rules の subject 用短縮 (先頭 40 文字)。
+fn short_rule(text: &str) -> &str {
+    if text.len() <= 40 {
+        text
+    } else {
+        // UTF-8 境界に合わせる。
+        let mut end = 40;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+}
+
 /// テキストの字 n-gram 集合。短すぎる時は全体を 1 要素にする (言語非依存)。
 fn char_ngrams(text: &str, n: usize) -> std::collections::BTreeSet<String> {
     let chars: Vec<char> = text.trim().chars().collect();
