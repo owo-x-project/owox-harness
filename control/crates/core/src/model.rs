@@ -308,6 +308,40 @@ fn parse_forbidden(section: &crate::markdown::Section) -> Result<Vec<ForbiddenTe
     Ok(out)
 }
 
+/// rules.md の1エントリ。phase scope + trigger メタ + 本文を持つ。
+///
+/// trigger/operations/paths は文字列で保持し、delivery.rs が型変換する (循環依存回避)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleEntry {
+    /// phase scope。None = Common (常時マッチ)。
+    pub phase: Option<Phase>,
+    /// セクション名 (render 時に使う)。
+    pub section: String,
+    /// trigger 種別名。空なら surface 既定 (rules = "operation")。
+    pub triggers: Vec<String>,
+    /// operation filter (空 = 全 operation にマッチ)。
+    pub operations: Vec<String>,
+    /// path glob filter (空 = 全 path にマッチ)。
+    pub paths: Vec<String>,
+    /// エントリ本文。
+    pub text: String,
+}
+
+/// practices.md の1エントリ。phase scope なし(成長層)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PracticeEntry {
+    /// trigger 種別名。空なら surface 既定 (practices = "path")。
+    pub triggers: Vec<String>,
+    /// operation filter (空 = 全 operation にマッチ)。
+    pub operations: Vec<String>,
+    /// path glob filter (空 = 全 path にマッチ)。
+    pub paths: Vec<String>,
+    /// 日付 (YYYYMMDD)
+    pub date: String,
+    /// 本文
+    pub text: String,
+}
+
 /// 成長層の指針 1 件。`日付: 指針` で書く。
 ///
 /// 経験から育つ運用指針。固定 rules.md と別管理で、AI が practice.add で育てる。
@@ -328,6 +362,8 @@ pub struct Practice {
 #[derive(Debug, Clone, Default)]
 pub struct Practices {
     pub entries: Vec<Practice>,
+    /// 豊かなエントリ(trigger+本文)。単一パーサが生成する。
+    pub rule_entries: Vec<PracticeEntry>,
 }
 
 impl Practices {
@@ -347,8 +383,87 @@ impl Practices {
                 }
             })
             .collect();
-        Ok(Practices { entries })
+        let rule_entries = parse_practice_entries_from_text(text);
+        Ok(Practices {
+            entries,
+            rule_entries,
+        })
     }
+}
+
+/// practices.md から `PracticeEntry` の Vec を生成する。
+///
+/// パースロジック:
+/// - `- 日付: 本文` 形式のエントリを読む
+/// - エントリの次行以降の `key: value` 行が属性 (trigger / operation / path)
+/// - 属性なし既定: path trigger
+fn parse_practice_entries_from_text(text: &str) -> Vec<PracticeEntry> {
+    struct Raw {
+        date: String,
+        text: String,
+        triggers: Vec<String>,
+        operations: Vec<String>,
+        paths: Vec<String>,
+    }
+
+    let mut current: Option<Raw> = None;
+    let mut out: Vec<PracticeEntry> = Vec::new();
+
+    let flush = |current: &mut Option<Raw>, out: &mut Vec<PracticeEntry>| {
+        let Some(raw) = current.take() else {
+            return;
+        };
+        out.push(PracticeEntry {
+            triggers: raw.triggers,
+            operations: raw.operations,
+            paths: raw.paths,
+            date: raw.date,
+            text: raw.text,
+        });
+    };
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("# ") || line.starts_with("## ") {
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            flush(&mut current, &mut out);
+            let (date, body) = split_pair(item.trim());
+            if date.is_empty() || body.is_empty() {
+                // 日付なし → スキップ
+                continue;
+            }
+            current = Some(Raw {
+                date,
+                text: body,
+                triggers: Vec::new(),
+                operations: Vec::new(),
+                paths: Vec::new(),
+            });
+            continue;
+        }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let values: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect();
+        match key.trim() {
+            "trigger" => entry.triggers.extend(values),
+            "operation" => entry.operations.extend(values),
+            "path" => entry.paths.extend(values),
+            _ => {}
+        }
+    }
+    flush(&mut current, &mut out);
+    out
 }
 
 /// rules.md: 作業ルール。AI が従う変更方針と止まる境界。
@@ -357,6 +472,8 @@ impl Practices {
 /// 全項目任意 (部分的に書ける)。
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
+    /// 豊かなエントリ(phase+trigger+本文)。単一パーサが生成する。
+    pub entries: Vec<RuleEntry>,
     /// Common rules. Always delivered regardless of phase.
     pub common: Vec<String>,
     /// 初期 phase だけで効く rules。
@@ -385,7 +502,9 @@ impl Rules {
         let mut doc = Doc::parse(text);
 
         let common = doc.take("Common").map(|s| s.list()).unwrap_or_default();
+        let entries = parse_rule_entries_from_text(text);
         let rules = Rules {
+            entries,
             common,
             initial: doc.take("Initial").map(|s| s.list()).unwrap_or_default(),
             stable: doc.take("Stable").map(|s| s.list()).unwrap_or_default(),
@@ -740,6 +859,113 @@ pub struct ModelTier {
     pub reasoning_effort: Option<String>,
 }
 
+/// rules.md から `RuleEntry` の Vec を生成する。
+///
+/// パースロジック:
+/// - `## セクション` でフェーズ/カテゴリを更新
+/// - `- 本文` でエントリ開始
+/// - エントリの次行以降の `key: value` 行が属性 (trigger / operation / path)
+/// - `## Irreversible operations` / `## Human gates` は entries に入れない
+fn parse_rule_entries_from_text(text: &str) -> Vec<RuleEntry> {
+    struct Raw {
+        phase: Option<Phase>,
+        section: String,
+        text: String,
+        triggers: Vec<String>,
+        operations: Vec<String>,
+        paths: Vec<String>,
+    }
+
+    /// セクション名からフェーズを返す。entries に入れないセクションは Err を返す。
+    fn section_to_phase(section: &str) -> Result<Option<Phase>, ()> {
+        match section.trim() {
+            "Irreversible operations" | "Human gates" => Err(()),
+            "Initial" => Ok(Some(Phase::Initial)),
+            "Stable" => Ok(Some(Phase::Stable)),
+            "Maintenance" => Ok(Some(Phase::Maintenance)),
+            _ => Ok(None),
+        }
+    }
+
+    let mut current: Option<Raw> = None;
+    let mut current_phase: Option<Phase> = None;
+    let mut current_section = String::new();
+    let mut skip_section = false;
+    let mut out: Vec<RuleEntry> = Vec::new();
+
+    let flush = |current: &mut Option<Raw>, out: &mut Vec<RuleEntry>| {
+        let Some(raw) = current.take() else {
+            return;
+        };
+        out.push(RuleEntry {
+            phase: raw.phase,
+            section: raw.section,
+            triggers: raw.triggers,
+            operations: raw.operations,
+            paths: raw.paths,
+            text: raw.text,
+        });
+    };
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("# ") {
+            continue;
+        }
+        if line.starts_with("## ") && !line.starts_with("### ") {
+            flush(&mut current, &mut out);
+            let sec = line["## ".len()..].trim().to_string();
+            match section_to_phase(&sec) {
+                Err(()) => {
+                    skip_section = true;
+                    current_section = sec;
+                }
+                Ok(phase) => {
+                    skip_section = false;
+                    current_phase = phase;
+                    current_section = sec;
+                }
+            }
+            continue;
+        }
+        if skip_section {
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            flush(&mut current, &mut out);
+            current = Some(Raw {
+                phase: current_phase,
+                section: current_section.clone(),
+                text: item.trim().to_string(),
+                triggers: Vec::new(),
+                operations: Vec::new(),
+                paths: Vec::new(),
+            });
+            continue;
+        }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let values: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect();
+        match key.trim() {
+            "trigger" => entry.triggers.extend(values),
+            "operation" => entry.operations.extend(values),
+            "path" => entry.paths.extend(values),
+            _ => {}
+        }
+    }
+    flush(&mut current, &mut out);
+    out
+}
+
 /// 取り出されずに残った見出しがあればエラー (誤記・未知項目の検出)。
 fn reject_unknown(doc: &Doc) -> Result<(), String> {
     let remaining = doc.remaining_headings();
@@ -873,5 +1099,91 @@ mod tests {
                 .language,
             None
         );
+    }
+
+    // --- 単一パーサ統合テスト ---
+
+    #[test]
+    fn rule_entries_phase_scope_and_trigger_parsed() {
+        // 単一パーサが phase scope と trigger 属性を同時に正しく解釈することを確認。
+        let rules = Rules::from_markdown(
+            "## Initial\n- do small diffs\ntrigger: always\n\
+             ## Stable\n- prefer stable apis\n\
+             ## Change policy\n- check before merge\noperation: edit\n",
+        )
+        .expect("読める");
+
+        // Initial セクションのエントリ: phase=Initial, trigger=always
+        let e0 = &rules.entries[0];
+        assert_eq!(e0.phase, Some(Phase::Initial));
+        assert_eq!(e0.triggers, vec!["always"]);
+        assert_eq!(e0.text, "do small diffs");
+
+        // Stable セクションのエントリ: phase=Stable, 属性なし
+        let e1 = &rules.entries[1];
+        assert_eq!(e1.phase, Some(Phase::Stable));
+        assert!(e1.triggers.is_empty(), "属性なし既定は空 triggers");
+        assert_eq!(e1.text, "prefer stable apis");
+
+        // Change policy セクションのエントリ: phase=None (Common), operation 属性
+        let e2 = &rules.entries[2];
+        assert_eq!(e2.phase, None);
+        assert_eq!(e2.operations, vec!["edit"]);
+        assert_eq!(e2.text, "check before merge");
+    }
+
+    #[test]
+    fn rule_entries_irreversible_and_human_gates_excluded() {
+        // Irreversible / Human gates は entries に入らない。
+        let rules = Rules::from_markdown(
+            "## Common\n- common rule\n\
+             ## Irreversible operations\n- drop db: dangerous\n\
+             ## Human gates\n- major refactor: needs human\n",
+        )
+        .expect("読める");
+
+        assert_eq!(rules.entries.len(), 1);
+        assert_eq!(rules.entries[0].text, "common rule");
+        // 既存フィールドは正常に入る
+        assert_eq!(rules.irreversible.len(), 1);
+        assert_eq!(rules.human_gate.len(), 1);
+    }
+
+    #[test]
+    fn practice_entries_with_trigger_attrs() {
+        // practices の単一パーサが trigger/path 属性を正しく解釈することを確認。
+        let p = Practices::from_markdown(
+            "## Practices\n\
+             - 20260614: add regression tests\npath: crates/**\n\
+             - 20260610: small diffs\n",
+        )
+        .expect("読める");
+
+        assert_eq!(p.rule_entries.len(), 2);
+
+        // path 属性があるエントリ
+        let e0 = &p.rule_entries[0];
+        assert_eq!(e0.date, "20260614");
+        assert_eq!(e0.paths, vec!["crates/**"]);
+        assert!(e0.triggers.is_empty());
+
+        // 属性なし既定: triggers は空 (delivery 側が path 既定として扱う)
+        let e1 = &p.rule_entries[1];
+        assert_eq!(e1.date, "20260610");
+        assert!(e1.triggers.is_empty());
+        assert!(e1.paths.is_empty());
+    }
+
+    #[test]
+    fn rule_entries_section_name_preserved() {
+        // section 名が RuleEntry に保持されることを確認 (render 時に使う)。
+        let rules = Rules::from_markdown(
+            "## Deletion policy\n- verify before delete\n\
+             ## Safety\n- no secrets in code\n",
+        )
+        .expect("読める");
+
+        assert_eq!(rules.entries[0].section, "Deletion policy");
+        assert_eq!(rules.entries[1].section, "Safety");
     }
 }

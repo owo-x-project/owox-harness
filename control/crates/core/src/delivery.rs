@@ -81,7 +81,13 @@ pub struct DeliveryRequest<'a> {
 }
 
 impl<'a> DeliveryRequest<'a> {
+    /// SessionStart 用リクエスト。always_limit は quality.toml の delivery.always_limit (既定 3)。
     pub fn session_start(phase: Phase) -> Self {
+        Self::session_start_with_limit(phase, 3)
+    }
+
+    /// SessionStart 用リクエスト (always_limit を明示する)。
+    pub fn session_start_with_limit(phase: Phase, always_limit: usize) -> Self {
         Self {
             operations: &[],
             paths: &[],
@@ -89,7 +95,7 @@ impl<'a> DeliveryRequest<'a> {
             include_always: true,
             include_path: false,
             include_operation: false,
-            always_limit: 3,
+            always_limit,
         }
     }
 
@@ -130,12 +136,32 @@ pub fn select_delivery_for_phase(
     req: DeliveryRequest<'_>,
     phase: Phase,
 ) -> Result<DeliverySelection, String> {
+    use crate::load::load_canon;
+
     let req = DeliveryRequest {
         phase: req.phase.or(Some(phase)),
         ..req
     };
-    let mut all = parse_rules(&owox_dir.join("rules.md"))?;
-    all.extend(parse_practices(&owox_dir.join("practices.md"))?);
+
+    let (rule_entries, practice_entries) = match load_canon(owox_dir) {
+        Ok(canon) => (canon.rules.entries, canon.practices.rule_entries),
+        Err(_) => (Vec::new(), Vec::new()),
+    };
+
+    let mut all: Vec<DeliveryEntry> = Vec::new();
+    let mut order = 0usize;
+    for entry in &rule_entries {
+        let mut de = rule_entry_to_delivery(entry)?;
+        de.order = order;
+        order += 1;
+        all.push(de);
+    }
+    for entry in &practice_entries {
+        let mut de = practice_entry_to_delivery(entry)?;
+        de.order = order;
+        order += 1;
+        all.push(de);
+    }
 
     let mut selected = DeliverySelection::default();
     let mut always_used = 0usize;
@@ -160,6 +186,102 @@ pub fn select_delivery_for_phase(
     }
 
     Ok(selected)
+}
+
+fn rule_entry_to_delivery(entry: &crate::model::RuleEntry) -> Result<DeliveryEntry, String> {
+    let triggers = if entry.triggers.is_empty() {
+        if entry.paths.is_empty() && entry.operations.is_empty() {
+            vec![TriggerKind::Operation]
+        } else {
+            let mut t = Vec::new();
+            if !entry.operations.is_empty() {
+                t.push(TriggerKind::Operation);
+            }
+            if !entry.paths.is_empty() {
+                t.push(TriggerKind::Path);
+            }
+            t
+        }
+    } else {
+        entry
+            .triggers
+            .iter()
+            .map(|s| match s.as_str() {
+                "always" => Ok(TriggerKind::Always),
+                "path" => Ok(TriggerKind::Path),
+                "operation" => Ok(TriggerKind::Operation),
+                other => Err(format!("未知の trigger: {other}")),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let operations = entry
+        .operations
+        .iter()
+        .map(|v| DeliveryOperation::parse(v))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let text = if entry.section.is_empty() {
+        entry.text.clone()
+    } else {
+        format!("{}: {}", entry.section, entry.text)
+    };
+
+    Ok(DeliveryEntry {
+        surface: DeliverySurface::Rules,
+        text,
+        order: 0,
+        triggers,
+        operations,
+        paths: entry.paths.clone(),
+        phase: entry.phase,
+    })
+}
+
+fn practice_entry_to_delivery(
+    entry: &crate::model::PracticeEntry,
+) -> Result<DeliveryEntry, String> {
+    let triggers = if entry.triggers.is_empty() {
+        if entry.paths.is_empty() && entry.operations.is_empty() {
+            vec![TriggerKind::Path]
+        } else {
+            let mut t = Vec::new();
+            if !entry.operations.is_empty() {
+                t.push(TriggerKind::Operation);
+            }
+            if !entry.paths.is_empty() {
+                t.push(TriggerKind::Path);
+            }
+            t
+        }
+    } else {
+        entry
+            .triggers
+            .iter()
+            .map(|s| match s.as_str() {
+                "always" => Ok(TriggerKind::Always),
+                "path" => Ok(TriggerKind::Path),
+                "operation" => Ok(TriggerKind::Operation),
+                other => Err(format!("未知の trigger: {other}")),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let operations = entry
+        .operations
+        .iter()
+        .map(|v| DeliveryOperation::parse(v))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(DeliveryEntry {
+        surface: DeliverySurface::Practices,
+        text: entry.text.clone(),
+        order: 0,
+        triggers,
+        operations,
+        paths: entry.paths.clone(),
+        phase: None,
+    })
 }
 
 pub fn render_delivery_block(selection: &DeliverySelection) -> String {
@@ -225,151 +347,20 @@ fn matches_paths(entry: &DeliveryEntry, paths: &[String]) -> bool {
     })
 }
 
-fn parse_rules(path: &Path) -> Result<Vec<DeliveryEntry>, String> {
-    parse_entries(path, DeliverySurface::Rules)
-}
-
-fn parse_practices(path: &Path) -> Result<Vec<DeliveryEntry>, String> {
-    parse_entries(path, DeliverySurface::Practices)
-}
-
-fn parse_entries(path: &Path, surface: DeliverySurface) -> Result<Vec<DeliveryEntry>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(format!("{} を読めない: {err}", path.display())),
-    };
-
-    let mut section = String::new();
-    let mut order = 0usize;
-    let mut current: Option<RawEntry> = None;
-    let mut out = Vec::new();
-
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with("# ") {
-            continue;
-        }
-        if line.starts_with("## ") && !line.starts_with("### ") {
-            flush_entry(surface, &mut current, &mut out, &mut order)?;
-            section = line["## ".len()..].trim().to_string();
-            continue;
-        }
-        if let Some(item) = line.strip_prefix("- ") {
-            flush_entry(surface, &mut current, &mut out, &mut order)?;
-            current = Some(RawEntry {
-                section: section.clone(),
-                text: item.trim().to_string(),
-                trigger_names: Vec::new(),
-                operations: Vec::new(),
-                paths: Vec::new(),
-            });
-            continue;
-        }
-        let Some(entry) = current.as_mut() else {
-            continue;
-        };
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let values: Vec<String> = value
-            .split(',')
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .collect();
-        match key.trim() {
-            "trigger" => entry.trigger_names.extend(values),
-            "operation" => entry.operations.extend(values),
-            "path" => entry.paths.extend(values),
-            _ => {}
-        }
-    }
-    flush_entry(surface, &mut current, &mut out, &mut order)?;
-    Ok(out)
-}
-
-struct RawEntry {
-    section: String,
-    text: String,
-    trigger_names: Vec<String>,
-    operations: Vec<String>,
-    paths: Vec<String>,
-}
-
-fn phase_for_section(section: &str) -> Option<Phase> {
-    match section.trim() {
-        "Initial" => Some(Phase::Initial),
-        "Stable" => Some(Phase::Stable),
-        "Maintenance" => Some(Phase::Maintenance),
-        _ => None,
-    }
-}
-
-fn flush_entry(
-    surface: DeliverySurface,
-    current: &mut Option<RawEntry>,
-    out: &mut Vec<DeliveryEntry>,
-    order: &mut usize,
-) -> Result<(), String> {
-    let Some(raw) = current.take() else {
-        return Ok(());
-    };
-    let phase = phase_for_section(&raw.section);
-    let triggers = resolve_triggers(surface, &raw)?;
-    let operations = raw
-        .operations
-        .iter()
-        .map(|v| DeliveryOperation::parse(v))
-        .collect::<Result<Vec<_>, _>>()?;
-    let text = if raw.section.is_empty() {
-        raw.text
-    } else {
-        format!("{}: {}", raw.section, raw.text)
-    };
-    out.push(DeliveryEntry {
-        surface,
-        text,
-        order: *order,
-        triggers,
-        operations,
-        paths: raw.paths,
-        phase,
-    });
-    *order += 1;
-    out.sort_by_key(|e| e.order);
-    Ok(())
-}
-
-fn resolve_triggers(surface: DeliverySurface, raw: &RawEntry) -> Result<Vec<TriggerKind>, String> {
-    let mut out = Vec::new();
-    if !raw.trigger_names.is_empty() {
-        for name in &raw.trigger_names {
-            let trigger = match name.as_str() {
-                "always" => TriggerKind::Always,
-                "path" => TriggerKind::Path,
-                "operation" => TriggerKind::Operation,
-                other => return Err(format!("未知の trigger: {other}")),
-            };
-            if !out.contains(&trigger) {
-                out.push(trigger);
-            }
-        }
-        return Ok(out);
-    }
-    if !raw.operations.is_empty() {
-        out.push(TriggerKind::Operation);
-    }
-    if !raw.paths.is_empty() {
-        out.push(TriggerKind::Path);
-    }
-    if out.is_empty() {
-        out.push(match surface {
-            DeliverySurface::Rules => TriggerKind::Operation,
-            DeliverySurface::Practices => TriggerKind::Path,
-        });
-    }
-    Ok(out)
+/// 依存関係ファイル (Cargo.toml 等) かどうかを判定する。
+pub fn is_dependency_path(path: &str) -> bool {
+    matches!(
+        path,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "go.mod"
+            | "go.sum"
+    )
 }
 
 #[cfg(test)]
@@ -385,6 +376,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("owox-delivery-test-{pid}-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // load_canon は brand.md 必須
+        std::fs::write(dir.join("brand.md"), "## Vision\ntest\n").unwrap();
         dir
     }
 
@@ -442,5 +435,101 @@ mod tests {
             select_delivery(&owox, DeliveryRequest::for_operations(&ops, &paths)).unwrap();
         assert_eq!(selected.rules.len(), 1);
         assert_eq!(selected.practices.len(), 1);
+    }
+
+    /// 他 phase (Stable) の rule は Initial の SessionStart に出ない。
+    #[test]
+    fn session_start_excludes_other_phase_rules() {
+        let owox = tempdir();
+        std::fs::write(
+            owox.join("rules.md"),
+            "## Initial\n- initial-only\ntrigger: always\n\
+             ## Stable\n- stable-only\ntrigger: always\n\
+             ## Common\n- common-always\ntrigger: always\n",
+        )
+        .unwrap();
+        let selected = select_delivery_for_phase(
+            &owox,
+            DeliveryRequest::session_start(crate::model::Phase::Initial),
+            crate::model::Phase::Initial,
+        )
+        .unwrap();
+        let texts: Vec<&str> = selected.rules.iter().map(|s| s.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("initial-only")),
+            "Initial rule は含まれるはず: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("common-always")),
+            "Common rule は含まれるはず: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("stable-only")),
+            "Stable rule は出ないはず: {texts:?}"
+        );
+    }
+
+    /// trigger:operation の common rule は SessionStart に出ない。
+    #[test]
+    fn session_start_excludes_operation_trigger_rules() {
+        let owox = tempdir();
+        std::fs::write(
+            owox.join("rules.md"),
+            "## Common\n- always-rule\ntrigger: always\n- operation-rule\noperation: edit\n",
+        )
+        .unwrap();
+        let selected = select_delivery_for_phase(
+            &owox,
+            DeliveryRequest::session_start(crate::model::Phase::Initial),
+            crate::model::Phase::Initial,
+        )
+        .unwrap();
+        let texts: Vec<&str> = selected.rules.iter().map(|s| s.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("always-rule")),
+            "always rule は含まれるはず: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("operation-rule")),
+            "operation trigger rule は SessionStart に出ないはず: {texts:?}"
+        );
+    }
+
+    /// always_limit を変えると SessionStart の件数上限が変わる。
+    #[test]
+    fn session_start_with_limit_respects_custom_limit() {
+        let owox = tempdir();
+        std::fs::write(
+            owox.join("rules.md"),
+            "## Common\n- r1\ntrigger: always\n- r2\ntrigger: always\n- r3\ntrigger: always\n",
+        )
+        .unwrap();
+        // limit=2 で 2 件まで
+        let selected = select_delivery_for_phase(
+            &owox,
+            DeliveryRequest::session_start_with_limit(crate::model::Phase::Initial, 2),
+            crate::model::Phase::Initial,
+        )
+        .unwrap();
+        assert_eq!(
+            selected.rules.len(),
+            2,
+            "limit=2 なら 2 件: {:?}",
+            selected.rules
+        );
+
+        // limit=10 で全件 (3件)
+        let selected2 = select_delivery_for_phase(
+            &owox,
+            DeliveryRequest::session_start_with_limit(crate::model::Phase::Initial, 10),
+            crate::model::Phase::Initial,
+        )
+        .unwrap();
+        assert_eq!(
+            selected2.rules.len(),
+            3,
+            "limit=10 なら全 3 件: {:?}",
+            selected2.rules
+        );
     }
 }
