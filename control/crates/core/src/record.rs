@@ -38,7 +38,7 @@ impl DecisionStatus {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             DecisionStatus::Open => "open",
             DecisionStatus::Adopted => "adopted",
@@ -488,6 +488,30 @@ pub fn load_decision(owox_dir: &Path, id: &str) -> Result<Decision, String> {
     Decision::parse(id, &text)
 }
 
+/// decision.get。来歴 1 件の全文を構造化して返す (canon 直読み禁止の読み口)。
+pub fn get_decision(owox_dir: &Path, id: &str) -> Envelope {
+    let bare_id = id.trim().strip_prefix("owox:dec:").unwrap_or(id.trim());
+    match load_decision(owox_dir, bare_id) {
+        Ok(d) => Envelope::ok(
+            "Decision.",
+            json!({
+                "id": d.id,
+                "title": d.title,
+                "status": d.status.as_str(),
+                "rationale": d.rationale,
+                "links": {
+                    "requirement": d.links.requirement,
+                    "work": d.links.work,
+                    "verification": d.links.verification,
+                },
+                "supersedes": d.supersedes,
+                "authorizes": d.authorizes,
+            }),
+        ),
+        Err(err) => Envelope::failed(err),
+    }
+}
+
 /// gate.list。status=open の来歴 (未承認の判断点) を返す。
 pub fn list_gates(owox_dir: &Path) -> Envelope {
     let decisions = match list_decisions(owox_dir) {
@@ -912,6 +936,54 @@ mod tests {
         );
         // rejected はキューに残らない。
         assert!(list_auto_pending(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_decision_returns_rationale() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("decisions")).unwrap();
+        std::fs::write(
+            dir.join("decisions/20260625-r.md"),
+            "# My decision\n\n## Status\n\nadopted\n\n## Rationale\n\nThis is the rationale.\n",
+        )
+        .unwrap();
+        let env = get_decision(&dir, "20260625-r");
+        assert_eq!(env.status, crate::envelope::Status::Ok);
+        let data = env.data.unwrap();
+        assert_eq!(data["id"], "20260625-r");
+        assert_eq!(data["title"], "My decision");
+        assert_eq!(data["status"], "adopted");
+        assert!(
+            data["rationale"]
+                .as_str()
+                .unwrap()
+                .contains("This is the rationale."),
+            "rationale が返っていない: {:?}",
+            data["rationale"]
+        );
+    }
+
+    #[test]
+    fn get_decision_accepts_owox_dec_prefix() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("decisions")).unwrap();
+        std::fs::write(
+            dir.join("decisions/20260625-p.md"),
+            "# Prefix test\n\n## Status\n\nopen\n",
+        )
+        .unwrap();
+        // owox:dec:<id> プレフィックス付きで渡しても動く。
+        let env = get_decision(&dir, "owox:dec:20260625-p");
+        assert_eq!(env.status, crate::envelope::Status::Ok);
+        assert_eq!(env.data.unwrap()["id"], "20260625-p");
+    }
+
+    #[test]
+    fn get_decision_fails_for_missing_id() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("decisions")).unwrap();
+        let env = get_decision(&dir, "nonexistent-id");
+        assert_eq!(env.status, crate::envelope::Status::Failed);
     }
 
     /// テスト用の一意な一時ディレクトリ (依存を足さず std だけで作る)。
