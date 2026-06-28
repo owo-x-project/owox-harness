@@ -32,9 +32,9 @@ use owox_core::{
     approve_gate, approve_gate_auto, close_task, create_requirement, create_task, drop_task,
     get_decision, get_requirement, glossary_lookup, is_ready, link_task, link_verification,
     list_decisions, list_gates, list_requirements, list_requirements_envelope,
-    list_skills_envelope, list_tasks, list_tasks_envelope, promote_skill, register_skill,
-    remember, review_lenses_envelope, run_code_decay, run_decay, run_quality,
-    run_verify, set_state, update_requirement, update_task,
+    list_skills_envelope, list_tasks, list_tasks_envelope, promote_skill, register_skill, remember,
+    review_lenses_envelope, run_code_decay, run_decay, run_quality, run_verify, set_state,
+    update_requirement, update_task,
 };
 
 use crate::clock::today_utc;
@@ -403,7 +403,8 @@ struct SkillRememberParams {
 /// canon.add の引数。
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CanonAddParams {
-    /// 追加先: brand / rules / practices / glossary。
+    /// 追加先: brand / rules / practices / glossary。設定 (config / quality / release / agents) は
+    /// 追加即時にできず canon.propose の人間ゲートを使う。
     target: String,
     /// brand / rules でどの一覧へ足すかの見出し。glossary / practices では不要。
     #[serde(default)]
@@ -415,18 +416,22 @@ struct CanonAddParams {
 /// canon.propose の引数。
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CanonProposeParams {
-    /// 対象: brand / rules / practices / glossary。
+    /// 対象: brand / rules / practices / glossary と設定 config / quality / release / agents。
+    /// 設定は add / remove / replace を全て人間ゲートで通す。
     target: String,
-    /// 構造化変更: remove は item を削除、replace は item を to へ置換。承認時に owox が適用する。
+    /// 構造化変更: add は item を追加、remove は item を削除、replace は item を to へ置換。承認時に owox が適用する。
     #[serde(default)]
     op: Option<String>,
     /// brand / rules でどの一覧かの見出し。glossary / practices では不要。
+    /// 設定では設定パス: config は settings.language / verify.checks、quality は layers /
+    /// bulk_delete_threshold / delivery.always_limit、release は checks / artifacts / policy / version.file、agents は roles / variants。
     #[serde(default)]
     section: Option<String>,
-    /// remove / replace で対象にする既存項目のテキスト。
+    /// remove / replace で対象にする既存項目の識別子。設定の配列は識別子 (name など)。
     #[serde(default)]
     item: Option<String>,
-    /// replace の置換後テキスト。
+    /// replace / add の新値。設定の配列エントリは 1 行のインラインテーブル ({ name = "build", command = "cargo build" })。
+    /// agents の roles は replace / remove のみ (add 不可)、variants は id 付きインラインテーブル ({ id = "...", ... })。
     #[serde(default)]
     to: Option<String>,
     /// op を使わない自由文の提案。単純な 1 項目でない編集の逃げ道。
@@ -761,9 +766,8 @@ impl OwoxServer {
             let tasks = list_tasks(&self.owox_dir).map_err(|err| {
                 McpError::internal_error(format!("タスクを読めない: {err}"), None)
             })?;
-            let requirements = list_requirements(&self.owox_dir).map_err(|err| {
-                McpError::internal_error(format!("要件を読めない: {err}"), None)
-            })?;
+            let requirements = list_requirements(&self.owox_dir)
+                .map_err(|err| McpError::internal_error(format!("要件を読めない: {err}"), None))?;
             if let Some(obj) = data.as_object_mut() {
                 obj.insert(
                     "kickoff".to_string(),
@@ -844,7 +848,7 @@ fn render_with_mission(mission: crate::cache::Mission, body: &str) -> String {
     format!("mission: {}\n\n{}", mission.as_str(), body)
 }
 
-#[tool_router(router = tool_router)]
+#[tool_router(router = flow_router)]
 impl OwoxServer {
     /// 判断を来歴へ記録する。status=open は未決の人間ゲートになる。
     #[tool(
@@ -933,10 +937,7 @@ impl OwoxServer {
     ///
     /// 読みは tool に一本化した (resource はモデルが取りに来ず不安定。
     /// `docs/decisions/20260613-Phase5-実機検証の是正.md`)。封筒でなく描画した本文を返す。
-    #[tool(
-        name = "context",
-        description = "Get the current read map."
-    )]
+    #[tool(name = "context", description = "Get the current read map.")]
     async fn context(
         &self,
         Parameters(p): Parameters<ContextParams>,
@@ -1259,7 +1260,10 @@ impl OwoxServer {
             &p.lesson,
         ))
     }
+}
 
+#[tool_router(router = requirement_router)]
+impl OwoxServer {
     /// 要件を作る。受け入れ基準をまとめて受けられる。
     #[tool(
         name = "requirement.create",
@@ -1409,7 +1413,10 @@ impl OwoxServer {
             &p.verification,
         ))
     }
+}
 
+#[tool_router(router = verify_router)]
+impl OwoxServer {
     /// 今の変更に適用されるレビュー観点を機械選択して返す (routable な枠組み)。
     #[tool(
         name = "review.lenses",
@@ -1487,6 +1494,11 @@ impl OwoxServer {
             &git_branch_list(work_dir),
             canon.quality.decay.branch_memory_stale_days,
             &today_utc(),
+        ));
+        // 検証設定の陳腐化: evidence_paths に宣言したファイルが消えていれば advisory で報告。
+        decay.extend(owox_core::detect_stale_verify_links(
+            &canon.verify.checks,
+            work_dir,
         ));
         let mut env = run_verify(&canon.verify, &requirements, &quality, &decay, work_dir);
         let changed = crate::files::changed_files(work_dir);
@@ -1808,7 +1820,10 @@ impl OwoxServer {
         };
         self.envelope_result(set_state(&self.owox_dir, &today_utc(), phase))
     }
+}
 
+#[tool_router(router = profile_router)]
+impl OwoxServer {
     /// プロジェクトの性質 (固定) を宣言する。開発方法論のモジュールが軸で出し入れされる。
     #[tool(
         name = "profile.set",
@@ -2017,7 +2032,10 @@ impl OwoxServer {
         let work_root = branch_work_root(work_dir, &self.owox_dir);
         self.envelope_result(owox_core::get_branch_memory_envelope(&work_root, &branch))
     }
+}
 
+#[tool_router(router = task_router)]
+impl OwoxServer {
     /// やることを 1 件作る。
     #[tool(
         name = "task.create",
@@ -2157,7 +2175,10 @@ impl OwoxServer {
     ) -> Result<CallToolResult, McpError> {
         self.envelope_result(drop_task(&self.owox_dir, &today_utc(), &p.id, &p.reason))
     }
+}
 
+#[tool_router(router = skill_router)]
+impl OwoxServer {
     /// スキルの 2 軸状態 (テスト・昇格) を一覧する。
     #[tool(
         name = "skill.list",
@@ -2207,11 +2228,14 @@ impl OwoxServer {
     ) -> Result<CallToolResult, McpError> {
         self.envelope_result(remember(&self.owox_dir, &today_utc(), &p.id, &p.text))
     }
+}
 
+#[tool_router(router = canon_router)]
+impl OwoxServer {
     /// canon (brand / rules / practices / glossary) へ項目を追加する。追加は AI 直接 + 来歴。
     #[tool(
         name = "canon.add",
-        description = "Add one canon item; changing or removing existing canon uses canon.propose."
+        description = "Add one canon item to brand, rules, practices, or glossary; changing or removing existing canon, and all config/quality/release/agents settings changes, use canon.propose."
     )]
     async fn canon_add(
         &self,
@@ -2232,7 +2256,7 @@ impl OwoxServer {
     /// canon の変更・削除を提案する。canon は変えず人間判断点として返す。
     #[tool(
         name = "canon.propose",
-        description = "Propose one canon change or removal for human decision."
+        description = "Propose one canon change or removal, or any config/quality/release/agents setting change, for human decision."
     )]
     async fn canon_propose(
         &self,
@@ -2254,7 +2278,10 @@ impl OwoxServer {
         attach_delivery_guidance(&mut env, &self.owox_dir, &ops, &[]);
         self.envelope_result(env)
     }
+}
 
+#[tool_router(router = knowledge_router)]
+impl OwoxServer {
     /// 汎用経験 (skill + practices) を out_path へ持ち出す。持ち出しは人間ゲート。
     #[tool(
         name = "experience.export",
@@ -2541,6 +2568,20 @@ fn envelope_result(
     let json = serde_json::to_string_pretty(&value)
         .map_err(|e| McpError::internal_error(format!("封筒を直列化できない: {e}"), None))?;
     Ok(CallToolResult::success(vec![Content::text(json)]))
+}
+
+impl OwoxServer {
+    /// 各 #[tool_router] が生成する個別ルータを連結し全 tool を束ねる。
+    fn tool_router() -> ToolRouter<Self> {
+        Self::flow_router()
+            + Self::requirement_router()
+            + Self::verify_router()
+            + Self::profile_router()
+            + Self::task_router()
+            + Self::skill_router()
+            + Self::canon_router()
+            + Self::knowledge_router()
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -4052,7 +4093,8 @@ fn decay_gardening_findings(decay: &[DecayFinding]) -> Vec<GardeningFinding> {
                 | "stale-knowledge"
                 | "stale-branch-memory"
                 | "stale-open-decision"
-                | "review-decision" => finding.kind,
+                | "review-decision"
+                | "stale-verify-link" => finding.kind,
                 _ => return None,
             };
             Some(GardeningFinding {
@@ -4619,8 +4661,14 @@ fn mission_preview(
     if mission == crate::cache::Mission::Kickoff {
         let fallback = owox_core::Canon::default();
         let canon = canon.as_ref().unwrap_or(&fallback);
-        let questions =
-            build_kickoff_questions(owox_dir, repo_root, canon, &decisions, &requirements, &tasks);
+        let questions = build_kickoff_questions(
+            owox_dir,
+            repo_root,
+            canon,
+            &decisions,
+            &requirements,
+            &tasks,
+        );
         return Some(render_kickoff_next(&questions));
     }
     let axes = canon
@@ -4690,9 +4738,10 @@ fn render_kickoff_context(
         out.push_str(&format!("- unresolved questions: {}\n", questions.len()));
         for question in questions.iter().take(5) {
             let detail = match question.kind {
-                QuestionKind::Confirm => {
-                    question.decided.clone().unwrap_or_else(|| question.item.clone())
-                }
+                QuestionKind::Confirm => question
+                    .decided
+                    .clone()
+                    .unwrap_or_else(|| question.item.clone()),
                 QuestionKind::Judge => question
                     .recommendation
                     .clone()
@@ -5334,9 +5383,8 @@ fn render_next(
             .push("Pick up a ready task above and implement it; owox does not ask which to start.");
     }
     if !untraced.is_empty() {
-        owox_actions.push(
-            "Add the missing verification traces above; owox writes these without a gate.",
-        );
+        owox_actions
+            .push("Add the missing verification traces above; owox writes these without a gate.");
     }
     if !decay.is_empty()
         || !gardening.is_empty()
@@ -7065,13 +7113,15 @@ mod tests {
     #[test]
     fn command_routing_reports_unreferenced_entry_tool() {
         // 宣伝 tool がどのコマンドからも参照されない時に entry-routing 所見が出る。
+        // 標準コマンドが全 entry_map_tools を参照するため、"review" コマンドを
+        // 空 body で上書きして未参照状態を作る (review は他コマンドの body に現れない)。
         let dir = std::env::temp_dir().join(format!("owox-routing-unrefd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // 何も含まないコマンド body。
+        // "review" コマンドを上書きして body から "review" を消す。
         std::fs::write(
             dir.join("commands.toml"),
-            "[[command]]\nname = \"empty\"\ndescription = \"d\"\nbody = \"do nothing\"\n",
+            "[[command]]\nname = \"review\"\ndescription = \"d\"\nbody = \"do nothing\"\n",
         )
         .unwrap();
         let findings = command_routing_findings(&dir);

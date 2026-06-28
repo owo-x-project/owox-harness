@@ -189,6 +189,7 @@ fn target_irreversible_detect_denies() {
         "Bash",
         Some("terraform destroy -auto-approve"),
         &canon.rules.irreversible,
+        3,
     );
     assert!(matches!(decision, HookDecision::Deny { .. }));
 }

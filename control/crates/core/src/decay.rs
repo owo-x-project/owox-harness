@@ -424,6 +424,33 @@ pub fn run_branch_memory_decay(
     findings
 }
 
+/// 検証設定の陳腐化を検出する。
+///
+/// 各検査が `evidence_paths` に宣言したファイル (work_dir 相対) が実在しない場合、
+/// kind="stale-verify-link" として報告する。is_structural()=false なので commit を止めない (advisory)。
+/// `evidence_paths` が空の検査はスキップする (宣言なし = 陳腐化判定なし)。決定論的 (与えた順)。
+pub fn detect_stale_verify_links(
+    checks: &[crate::model::VerifyCheck],
+    work_dir: &Path,
+) -> Vec<DecayFinding> {
+    let mut findings = Vec::new();
+    for check in checks {
+        for path in &check.evidence_paths {
+            if !work_dir.join(path).exists() {
+                findings.push(DecayFinding {
+                    kind: "stale-verify-link",
+                    subject: check.name.clone(),
+                    detail: format!(
+                        "evidence path {} for check {} no longer exists",
+                        path, check.name
+                    ),
+                });
+            }
+        }
+    }
+    findings
+}
+
 /// コード/repo の腐敗を検出する (`docs/decisions/20260614-Phase7-コードrepo腐敗検知.md`)。
 ///
 /// owox 直接検出は内容一致の重複ファイルだけ。死コード等は `[[decay.checks]]` の検査コマンドへ委譲する。
@@ -983,10 +1010,12 @@ mod tests {
                 crate::model::VerifyCheck {
                     name: "dead code".to_string(),
                     command: "exit 1".to_string(), // decay 有り (非ゼロ)
+                    evidence_paths: Vec::new(),
                 },
                 crate::model::VerifyCheck {
                     name: "clean".to_string(),
                     command: "true".to_string(), // decay 無し (通過)
+                    evidence_paths: Vec::new(),
                 },
             ],
             ..DecayConfig::default()
@@ -1033,6 +1062,48 @@ mod tests {
         }];
         // existing が空 (git を読めない) なら孤児判定を飛ばす (誤検出しない)。
         let f = run_branch_memory_decay(&mems, &[], 30, "20260618");
+        assert!(f.is_empty());
+    }
+
+    // --- detect_stale_verify_links ---
+
+    fn verify_check(name: &str, paths: Vec<&str>) -> crate::model::VerifyCheck {
+        crate::model::VerifyCheck {
+            name: name.to_string(),
+            command: "true".to_string(),
+            evidence_paths: paths.into_iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn stale_verify_link_missing_path_flagged() {
+        let dir = tempdir();
+        // "report.txt" は作成しない → missing。
+        let checks = vec![verify_check("ci-report", vec!["report.txt"])];
+        let f = detect_stale_verify_links(&checks, &dir);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "stale-verify-link");
+        assert_eq!(f[0].subject, "ci-report");
+        assert!(f[0].detail.contains("report.txt"));
+        assert!(f[0].detail.contains("ci-report"));
+        // 陳腐化リンクは advisory (commit を止めない)。
+        assert!(!f[0].is_structural());
+    }
+
+    #[test]
+    fn stale_verify_link_existing_path_clean() {
+        let dir = tempdir();
+        write(&dir, "proof.txt", "ok");
+        let checks = vec![verify_check("my-check", vec!["proof.txt"])];
+        let f = detect_stale_verify_links(&checks, &dir);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn stale_verify_link_empty_evidence_paths_yields_none() {
+        let dir = tempdir();
+        let checks = vec![verify_check("no-evidence", vec![])];
+        let f = detect_stale_verify_links(&checks, &dir);
         assert!(f.is_empty());
     }
 }

@@ -65,6 +65,7 @@ impl Release {
                 .map(|c| VerifyCheck {
                     name: c.name,
                     command: c.command,
+                    evidence_paths: Vec::new(),
                 })
                 .collect(),
         })

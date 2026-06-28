@@ -802,6 +802,8 @@ struct VerifyRaw {
 struct VerifyCheckRaw {
     name: String,
     command: String,
+    #[serde(default)]
+    evidence_paths: Vec<String>,
 }
 
 /// verify の設定。検証完了の機械判定で実行する検査コマンド。
@@ -824,6 +826,7 @@ impl VerifyConfig {
             .map(|c| VerifyCheck {
                 name: c.name,
                 command: c.command,
+                evidence_paths: c.evidence_paths,
             })
             .collect();
         Ok(VerifyConfig { checks })
@@ -831,10 +834,12 @@ impl VerifyConfig {
 }
 
 /// 検査 1 件。name は人間向けラベル、command はシェルで実行する検査コマンド。
+/// evidence_paths: この検査が完了の証拠とするファイルパス (work_dir 相対)。空でも可。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyCheck {
     pub name: String,
     pub command: String,
+    pub evidence_paths: Vec<String>,
 }
 
 /// 生成対象 CLI 1 件。
@@ -1185,5 +1190,37 @@ mod tests {
 
         assert_eq!(rules.entries[0].section, "Deletion policy");
         assert_eq!(rules.entries[1].section, "Safety");
+    }
+
+    // --- VerifyConfig::from_toml ---
+
+    #[test]
+    fn verify_check_with_evidence_paths_parsed() {
+        let toml = "\
+[[verify.checks]]\n\
+name = \"ci\"\n\
+command = \"make test\"\n\
+evidence_paths = [\"dist/report.txt\", \"coverage/index.html\"]\n";
+        let cfg = VerifyConfig::from_toml(toml).expect("パースできる");
+        assert_eq!(cfg.checks.len(), 1);
+        assert_eq!(cfg.checks[0].name, "ci");
+        assert_eq!(cfg.checks[0].command, "make test");
+        assert_eq!(
+            cfg.checks[0].evidence_paths,
+            vec!["dist/report.txt", "coverage/index.html"]
+        );
+    }
+
+    #[test]
+    fn verify_check_without_evidence_paths_defaults_to_empty() {
+        // evidence_paths を書かなくても既存の config.toml がパースできることを確認。
+        let toml = "\
+[[verify.checks]]\n\
+name = \"lint\"\n\
+command = \"cargo clippy\"\n";
+        let cfg = VerifyConfig::from_toml(toml).expect("パースできる");
+        assert_eq!(cfg.checks.len(), 1);
+        assert_eq!(cfg.checks[0].name, "lint");
+        assert!(cfg.checks[0].evidence_paths.is_empty());
     }
 }

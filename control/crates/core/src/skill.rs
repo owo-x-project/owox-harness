@@ -437,6 +437,7 @@ pub fn run_skill_tests(skill: &Skill, repo_root: &Path) -> Vec<CheckResult> {
                 .unwrap_or("test")
                 .to_string(),
             command: p.display().to_string(),
+            evidence_paths: Vec::new(),
         })
         .collect();
     run_checks(repo_root, &checks)

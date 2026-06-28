@@ -59,23 +59,18 @@ pub fn floor_context(canon: &Canon) -> String {
     out
 }
 
-/// SessionStart 床コンテキストの Entry map が宣伝する tool 名の一覧。
+/// command_routing_findings が配線検査する「コマンド入口ツール」の一覧。
 ///
-/// command_routing_findings (庭師の設計時配線検査) はこの一覧を真実源として、
-/// commands.toml のいずれかのコマンドから参照されているかを動的に検査する。
-/// floor_context の Entry map と必ず同期して更新すること。
+/// このリストは、commands.toml のいずれかのコマンド本体から参照されているべきツールを定義する。
+/// command_routing_findings はこの一覧を真実源として、各ツールが実際にコマンド本体に
+/// 現れているかを動的に検査し、漏れがあれば "entry-routing" 助言を出す。
+///
+/// rules.lookup / glossary.lookup / practice.lookup は floor_context の Entry map で
+/// AI へ存在を知らせているが、コマンド入口ではなく AI が自身の判断で呼ぶ「バックストップ
+/// ツール」であるため、このリストには含めない。これらを含めると next / verify.run など
+/// あらゆる呼び出しで不要な "entry-routing" 助言が発生する設計上の誤りとなる。
 pub fn entry_map_tools() -> &'static [&'static str] {
-    &[
-        "kickoff",
-        "next",
-        "context",
-        "verify",
-        "review",
-        "skill",
-        "rules.lookup",
-        "glossary.lookup",
-        "practice.lookup",
-    ]
+    &["kickoff", "next", "context", "verify", "review", "skill"]
 }
 
 /// 注入する brand 本文 (`## Brand` ラベル配下)。語トリガ push が使う。
@@ -426,7 +421,29 @@ pub fn pre_tool_use_decision(
     tool_name: &str,
     command: Option<&str>,
     irreversible: &[Irreversible],
+    bulk_delete_threshold: usize,
 ) -> HookDecision {
+    // apply_patch の一括削除ガード。Bash 判定より先に処理する。
+    // threshold が 0 なら無効 (チェックしない)。
+    if tool_name == "apply_patch" {
+        if let Some(patch) = command
+            && bulk_delete_threshold > 0
+        {
+            let delete_count = parse_patch_changes(patch)
+                .into_iter()
+                .filter(|c| c.op == PatchOp::Delete)
+                .count();
+            if delete_count >= bulk_delete_threshold {
+                return HookDecision::Deny {
+                    reason: format!(
+                        "This apply_patch deletes {delete_count} files at once, which is irreversible. If this is intended, delete fewer files per patch, or record a decision with decision.record listing them under authorizes and have a human approve it with gate.approve before retrying."
+                    ),
+                };
+            }
+        }
+        return HookDecision::Allow;
+    }
+
     if tool_name != "Bash" {
         return HookDecision::Allow;
     }
@@ -1035,7 +1052,7 @@ mod tests {
         matches!(d, HookDecision::Allow)
     }
     fn decide(tool_name: &str, command: Option<&str>) -> HookDecision {
-        pre_tool_use_decision(tool_name, command, &[])
+        pre_tool_use_decision(tool_name, command, &[], 3)
     }
 
     #[test]
@@ -1060,6 +1077,87 @@ mod tests {
     #[test]
     fn non_bash_allows() {
         assert!(is_allow(&decide("apply_patch", None)));
+    }
+
+    /// apply_patch のファイル削除が閾値以上なら deny。
+    #[test]
+    fn apply_patch_bulk_delete_at_threshold_denies() {
+        let patch = "*** Begin Patch\n*** Delete File: a.rs\n*** Delete File: b.rs\n*** Delete File: c.rs\n*** End Patch\n";
+        // threshold=3、削除 3 件 → deny。
+        let d = pre_tool_use_decision("apply_patch", Some(patch), &[], 3);
+        assert!(is_deny(&d));
+        if let HookDecision::Deny { reason } = d {
+            assert!(
+                reason.contains("3 files"),
+                "reason should mention count: {reason}"
+            );
+            assert!(
+                reason.contains("decision.record"),
+                "reason should mention decision.record: {reason}"
+            );
+        }
+    }
+
+    /// apply_patch のファイル削除が閾値未満なら allow。
+    #[test]
+    fn apply_patch_bulk_delete_below_threshold_allows() {
+        let patch =
+            "*** Begin Patch\n*** Delete File: a.rs\n*** Delete File: b.rs\n*** End Patch\n";
+        // threshold=3、削除 2 件 → allow。
+        assert!(is_allow(&pre_tool_use_decision(
+            "apply_patch",
+            Some(patch),
+            &[],
+            3
+        )));
+    }
+
+    /// apply_patch で削除が無ければ (Add/Update のみ) allow。
+    #[test]
+    fn apply_patch_no_deletes_allows() {
+        let patch = "*** Begin Patch\n*** Add File: x.rs\n*** Update File: y.rs\n*** End Patch\n";
+        assert!(is_allow(&pre_tool_use_decision(
+            "apply_patch",
+            Some(patch),
+            &[],
+            3
+        )));
+    }
+
+    /// apply_patch 以外の非 Bash ツールは allow。
+    #[test]
+    fn non_bash_non_apply_patch_allows() {
+        assert!(is_allow(&pre_tool_use_decision(
+            "Edit",
+            Some("file.rs"),
+            &[],
+            3
+        )));
+        assert!(is_allow(&pre_tool_use_decision(
+            "Write",
+            Some("file.rs"),
+            &[],
+            3
+        )));
+        assert!(is_allow(&pre_tool_use_decision(
+            "Read",
+            Some("file.rs"),
+            &[],
+            3
+        )));
+    }
+
+    /// threshold=0 は一括削除ガードを無効にする。
+    #[test]
+    fn apply_patch_threshold_zero_disables_guard() {
+        let patch = "*** Begin Patch\n*** Delete File: a.rs\n*** Delete File: b.rs\n*** Delete File: c.rs\n*** Delete File: d.rs\n*** Delete File: e.rs\n*** End Patch\n";
+        // threshold=0 は無効 → allow。
+        assert!(is_allow(&pre_tool_use_decision(
+            "apply_patch",
+            Some(patch),
+            &[],
+            0
+        )));
     }
 
     #[test]
@@ -1926,5 +2024,35 @@ mod tests {
             "Stable rule は漏れないはず: {}",
             inj.context
         );
+    }
+
+    /// entry_map_tools はコマンド入口ツール 6 件を含み、
+    /// バックストップ lookup ツール 3 件を含まない。
+    #[test]
+    fn entry_map_tools_excludes_backstop_lookups() {
+        let tools = entry_map_tools();
+
+        // バックストップ lookup ツールは含まれてはならない。
+        assert!(
+            !tools.contains(&"rules.lookup"),
+            "rules.lookup は entry_map_tools に含まれてはならない"
+        );
+        assert!(
+            !tools.contains(&"glossary.lookup"),
+            "glossary.lookup は entry_map_tools に含まれてはならない"
+        );
+        assert!(
+            !tools.contains(&"practice.lookup"),
+            "practice.lookup は entry_map_tools に含まれてはならない"
+        );
+
+        // コマンド入口ツール 6 件はすべて含まれている必要がある。
+        for expected in &["kickoff", "next", "context", "verify", "review", "skill"] {
+            assert!(
+                tools.contains(expected),
+                "{} は entry_map_tools に含まれていなければならない",
+                expected
+            );
+        }
     }
 }

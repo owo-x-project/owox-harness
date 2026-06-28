@@ -615,16 +615,19 @@ fn parse_history(section: &crate::markdown::Section) -> Result<Vec<RequirementCh
             .last_mut()
             .ok_or("History の属性は日付の箇条書きの後に書く")?;
         match key.as_str() {
-            "title" => entry.kinds.push(ChangeKind::TitleChanged { new_title: value }),
+            "title" => entry
+                .kinds
+                .push(ChangeKind::TitleChanged { new_title: value }),
             "statement" => entry.kinds.push(ChangeKind::StatementChanged),
             "status" => entry.kinds.push(ChangeKind::StatusChanged {
                 new_status: RequirementStatus::parse(&value)?,
             }),
             "criteria-added" => {
                 for id_str in value.split(',') {
-                    let id: u32 = id_str.trim().parse().map_err(|_| {
-                        format!("History criteria-added の id は番号: {id_str}")
-                    })?;
+                    let id: u32 = id_str
+                        .trim()
+                        .parse()
+                        .map_err(|_| format!("History criteria-added の id は番号: {id_str}"))?;
                     entry.kinds.push(ChangeKind::CriterionAdded { id });
                 }
             }
@@ -1045,9 +1048,7 @@ pub fn add_criterion(
         Err(err) => return Envelope::failed(err),
     };
     if given.trim().is_empty() || when.trim().is_empty() || then.trim().is_empty() {
-        return Envelope::failed(
-            "An acceptance criterion needs non-empty given, when, and then.",
-        );
+        return Envelope::failed("An acceptance criterion needs non-empty given, when, and then.");
     }
 
     let next = requirement.criteria.iter().map(|c| c.id).max().unwrap_or(0) + 1;
@@ -1772,7 +1773,12 @@ mod tests {
         let req = load_requirement(&dir, &id).unwrap();
         assert_eq!(req.changes.len(), 1);
         assert_eq!(req.changes[0].date, "20260628");
-        assert!(req.changes[0].kinds.iter().any(|k| matches!(k, ChangeKind::TitleChanged { .. })));
+        assert!(
+            req.changes[0]
+                .kinds
+                .iter()
+                .any(|k| matches!(k, ChangeKind::TitleChanged { .. }))
+        );
         // もう一度読み直して round-trip を確認。
         let text = std::fs::read_to_string(requirement_path(&dir, &id)).unwrap();
         let req2 = Requirement::parse(&id, &text).unwrap();
@@ -1855,10 +1861,21 @@ mod tests {
         let req = load_requirement(&dir, &id).unwrap();
         assert_eq!(req.changes.len(), 1);
         let kinds = &req.changes[0].kinds;
-        assert!(kinds.iter().any(|k| matches!(k, ChangeKind::TitleChanged { .. })));
-        assert!(kinds.iter().any(|k| matches!(k, ChangeKind::StatementChanged)));
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, ChangeKind::TitleChanged { .. }))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, ChangeKind::StatementChanged))
+        );
         // title/statement 変更はこの update で作られた decision を結ぶ。
-        assert_eq!(req.changes[0].decision_id, env.decision_ids.first().cloned());
+        assert_eq!(
+            req.changes[0].decision_id,
+            env.decision_ids.first().cloned()
+        );
         assert!(req.changes[0].decision_id.is_some());
     }
 

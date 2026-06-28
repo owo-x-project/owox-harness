@@ -42,6 +42,16 @@ pub struct Quality {
     pub layers: Vec<Layer>,
     /// 配送調整 (`[delivery]`)。always 上限などを設定する。
     pub delivery: DeliveryConfig,
+    /// apply_patch の一括削除ガード閾値。この件数以上のファイル削除を 1 パッチで行おうとしたら
+    /// 機械強制で deny する。0 は無効。省略時の既定は 3。
+    pub bulk_delete_threshold: Option<usize>,
+}
+
+impl Quality {
+    /// apply_patch の一括削除ガード閾値。省略時は既定の 3。0 は無効扱いにする呼び出し側が担う。
+    pub fn bulk_delete_threshold(&self) -> usize {
+        self.bulk_delete_threshold.unwrap_or(3)
+    }
 }
 
 /// 層の自律度。核ほど慎重。ゲート合成のはしごへ写像する (`gate.rs`)。
@@ -207,6 +217,7 @@ struct QualityRaw {
     layers: Vec<LayerRaw>,
     #[serde(default)]
     delivery: DeliveryRaw,
+    bulk_delete_threshold: Option<usize>,
 }
 
 /// `[delivery]` の生表現。各値は省略可で、省略時は DeliveryConfig の既定値。
@@ -340,6 +351,7 @@ impl Quality {
                     .map(|c| VerifyCheck {
                         name: c.name,
                         command: c.command,
+                        evidence_paths: Vec::new(),
                     })
                     .collect(),
                 gardening_floor_bloat_tokens: raw
@@ -380,6 +392,7 @@ impl Quality {
                     always_limit: raw.delivery.always_limit.unwrap_or(dv.always_limit),
                 }
             },
+            bulk_delete_threshold: raw.bulk_delete_threshold,
         })
     }
 

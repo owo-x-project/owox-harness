@@ -49,7 +49,9 @@ pub const QUESTION_TOOL_PLACEHOLDER: &str = "{{QUESTION_TOOL}}";
 pub fn apply_question_tool(skill_md: &str, question_tool: Option<&str>) -> String {
     let phrasing = match question_tool {
         Some(tool) => format!("using the {tool} tool"),
-        None => "by asking in plain text (this client has no interactive question tool)".to_string(),
+        None => {
+            "by asking in plain text (this client has no interactive question tool)".to_string()
+        }
     };
     skill_md.replace(QUESTION_TOOL_PLACEHOLDER, &phrasing)
 }
@@ -258,7 +260,10 @@ mod tests {
 
     #[test]
     fn apply_question_tool_leaves_untokened_text_unchanged() {
-        assert_eq!(apply_question_tool("no token here", Some("X")), "no token here");
+        assert_eq!(
+            apply_question_tool("no token here", Some("X")),
+            "no token here"
+        );
     }
 
     const OWOX_BLOCK: &str = "[mcp_servers.owox]\ncommand = \"owox\"\nargs = [\"serve\"]\n";

@@ -40,3 +40,4 @@
 - `20260625-codebase-コードベース索引.md`: 草案。コードベース調査結果を永続記憶でなく索引 cache として扱い、`context scope="codebase"` で本文なしの repo 地図を返す方針。腐ったら再計算し、耐久事実は `knowledge.add`、判断は `decision.record` へ昇格する
 - `20260625-mission-kickoff.md`: 草案。session 任務は常に 1 つあり既定は `work`、`kickoff` は `mission.start type="kickoff"` で手動切替する方針。切替後の `next` / `context` / `verify.run` などは未確定事項の洗い出しと1論点ずつの判断詰めへ最適化される。全質問に AI の推奨案と理由を必ず添え、自動正本書込はしない
 - `20260627-manifest-正本索引方針.md`: 草案。初期実装では専用 manifest を作らず、`context scope="codebase"` と codebase index cache を正本探索の入口にする方針
+- `20260628-設定の統一canon化.md`: 実装中。TOML 設定 (config/quality/release/agents) と context.md を canon 窓口から AI が読み書きできるようにする。canon を backend 分岐 (prose は既存維持・structured は config/quality/release/agents を全操作人間ゲート)・変更削除は識別子フィールド照合・スキーマ検証して TOML 書き戻し。新規設定書込 tool は増やさない。真実源は `docs/decisions/20260628-設定の統一canon化.md`

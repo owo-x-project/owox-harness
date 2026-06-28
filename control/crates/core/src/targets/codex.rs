@@ -227,7 +227,10 @@ mod tests {
         let md = files.iter().find(|f| f.path.ends_with("SKILL.md")).unwrap();
         assert!(md.contents.contains("plain text"), "{}", md.contents);
         assert!(!md.contents.contains("AskUserQuestion"));
-        assert!(!md.contents.contains(crate::target::QUESTION_TOOL_PLACEHOLDER));
+        assert!(
+            !md.contents
+                .contains(crate::target::QUESTION_TOOL_PLACEHOLDER)
+        );
     }
 
     #[test]

@@ -237,8 +237,12 @@ fn pre_tool_use() -> ExitCode {
         .unwrap_or_default();
 
     // 不可逆操作は最優先で deny (機械強制)。
+    let bulk_delete_threshold = canon
+        .as_ref()
+        .map(|c| c.quality.bulk_delete_threshold())
+        .unwrap_or(3);
     if let owox_core::HookDecision::Deny { reason } =
-        owox_core::pre_tool_use_decision(tool_name, command, irreversible)
+        owox_core::pre_tool_use_decision(tool_name, command, irreversible, bulk_delete_threshold)
     {
         return deny_pre_tool_use(reason);
     }
@@ -540,8 +544,9 @@ fn stop() -> ExitCode {
     };
 
     // 検査失敗で停止を保留 (ブロック) する局面か。この時は gate を表面化しないので gate 署名も覚えない。
-    let verify_blocking =
-        dirty && !input.stop_hook_active && matches!(verify, owox_core::VerifyOutcome::Failed { .. });
+    let verify_blocking = dirty
+        && !input.stop_hook_active
+        && matches!(verify, owox_core::VerifyOutcome::Failed { .. });
 
     match owox_core::stop_decision(
         input.stop_hook_active,
@@ -556,7 +561,10 @@ fn stop() -> ExitCode {
         owox_core::StopDecision::Continue { reason } => {
             // gate の顔ぶれが変わって表面化したなら今の署名を覚え、同じ顔ぶれの間は黙る。
             // 検査失敗で gate を出していない時は覚えない (次に通った時へ表面化を残す)。
-            if !verify_blocking && gates_changed && let Some(sig) = &gate_signature {
+            if !verify_blocking
+                && gates_changed
+                && let Some(sig) = &gate_signature
+            {
                 remember_gate_signature(cwd, input.session_id.as_deref(), sig);
             }
             emit_stop_continue(reason)

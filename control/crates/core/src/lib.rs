@@ -52,8 +52,8 @@ pub use canon_detect::{
 };
 pub use commands::{Command, command_skills, load_commands};
 pub use decay::{
-    DecayFinding, run_branch_memory_decay, run_code_decay, run_decay, run_knowledge_decay,
-    run_practice_decay, run_practice_redundancy, run_rules_redundancy,
+    DecayFinding, detect_stale_verify_links, run_branch_memory_decay, run_code_decay, run_decay,
+    run_knowledge_decay, run_practice_decay, run_practice_redundancy, run_rules_redundancy,
 };
 pub use delivery::{
     DeliveryOperation, DeliveryRequest, DeliverySelection, is_dependency_path,

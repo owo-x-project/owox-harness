@@ -717,6 +717,7 @@ mod tests {
         vec![VerifyCheck {
             name: cmd.to_string(),
             command: cmd.to_string(),
+            evidence_paths: Vec::new(),
         }]
     }
 

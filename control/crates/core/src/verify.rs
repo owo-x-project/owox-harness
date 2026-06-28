@@ -355,6 +355,7 @@ mod tests {
                 .map(|c| VerifyCheck {
                     name: c.to_string(),
                     command: c.to_string(),
+                    evidence_paths: Vec::new(),
                 })
                 .collect(),
         }
