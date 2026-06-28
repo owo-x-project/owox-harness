@@ -94,10 +94,11 @@ pub use quality::{
     run_brand, run_quality,
 };
 pub use record::{
-    Decision, DecisionLinks, DecisionStatus, ProposedChange, RecordInput, approve_gate,
-    approve_gate_auto, confirm_auto_approval, gate_autonomy, get_decision, list_auto_pending,
-    list_decisions, list_gates, load_decision, mark_gate_consumed, record_decision,
-    record_decision_with_authorization, record_decision_with_change, reject_decision,
+    Decision, DecisionKind, DecisionLinks, DecisionStatus, ProposedChange, RecordInput,
+    approve_gate, approve_gate_auto, confirm_auto_approval, gate_autonomy, get_decision,
+    list_auto_pending, list_decisions, list_gates, load_decision, mark_gate_consumed,
+    record_decision, record_decision_with_authorization, record_decision_with_change,
+    record_decision_with_kind, reject_decision,
 };
 pub use release::{Release, VersionSource};
 pub use requirement::{

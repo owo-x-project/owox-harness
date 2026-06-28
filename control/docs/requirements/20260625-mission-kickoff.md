@@ -90,6 +90,16 @@ mission: kickoff
 
 切替しない限り、任務適応は続く。
 
+### kickoff 以外の任務の挙動
+
+`docs/decisions/20260628-任務別行動軸.md`。mission は行動軸 (owox が断定する今すぐやること) と
+verify/context の焦点を切り替える。新しいゲートは作らない (判断2軸より)。
+
+- `review`: `next` の先頭行動を「差分を読む (context scope diff) → 所見を decision.record / task.create で記録。新規実装はしない」に。`verify.run` の次の手は所見化へ向ける
+- `verify`: 先頭行動を「verify.run → 未トレース要件を検査へ link → 作業範囲確認」に。検査結果自体は mission 不問で一貫
+- `handoff`: 先頭行動を「検証状態 + 未決を要約 → 残作業を task 化 → handoff skill で引き継ぎ文」に
+- 非 `work` 任務は保留が無くても沈黙せず、任務の作業を断定で出す
+
 ### kickoff 中の挙動
 
 `next`:

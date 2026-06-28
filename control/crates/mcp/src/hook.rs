@@ -361,40 +361,9 @@ fn commit_gate_decision(cwd: Option<&str>, canon: Option<&owox_core::Canon>) -> 
     };
 
     let work_dir = cwd.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    // 直前 verify.run と作業ツリーが同一なら、その検査結果を再利用する。一致しない・記録が無い時は
-    // フレッシュに検査を走らせる。
-    let cached = crate::cache::read_verify_record(&owox_dir(cwd));
-    let current_sig = crate::files::tree_signature(&work_dir);
-    let reuse = match (&cached, &current_sig) {
-        (Some(rec), Some(sig)) => (rec.signature == *sig).then_some(rec),
-        _ => None,
-    };
-    let outcome = match reuse {
-        // needs_human = 検査未設定 (verify.rs の判定と整合)。
-        Some(rec) => match rec.verification.as_str() {
-            "passed" => owox_core::VerifyOutcome::Passed,
-            "failed" => owox_core::VerifyOutcome::Failed {
-                failed: rec.failed.clone(),
-            },
-            _ => owox_core::VerifyOutcome::NoChecks,
-        },
-        None => {
-            let results = owox_core::run_checks(&work_dir, &canon.verify.checks);
-            if canon.verify.checks.is_empty() {
-                owox_core::VerifyOutcome::NoChecks
-            } else if results.iter().all(|r| r.passed) {
-                owox_core::VerifyOutcome::Passed
-            } else {
-                owox_core::VerifyOutcome::Failed {
-                    failed: results
-                        .iter()
-                        .filter(|r| !r.passed)
-                        .map(|r| r.name.clone())
-                        .collect(),
-                }
-            }
-        }
-    };
+    // 直前 verify.run / Stop と作業ツリーが同一なら検査結果を再利用、無ければフレッシュ実行して記録する
+    // (Stop と共用。署名一致 = 同一結果で二重実行を避ける)。
+    let (outcome, _fresh) = cached_verify_outcome(&owox_dir(cwd), &work_dir, canon);
 
     let open_gates = count_open_gates(cwd);
 
@@ -540,88 +509,135 @@ fn remind_pre_tool_use(message: String) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Stop。完了前に verify・判断記録を促す。継続は 1 ターンに高々 1 回。
+/// Stop。完了検証を機械強制する。変更があるターンの終わりに検査を自動実行し、失敗なら継続させ
+/// 修正へ向ける (verify.run を促すだけで AI 任せにしない。`docs/decisions/20260627-判断2軸と対話kickoff.md`)。
+/// 検査は直前 verify.run / commit と作業ツリーが同一なら記録を再利用し、無ければフレッシュ実行して
+/// 記録する (二重実行を避ける)。ブロック・継続は 1 ターン高々 1 回 (直せない検査でのスタックを防ぐ)。
 /// 作業ツリーがクリーン かつ 未決 gate ゼロ なら黙って終わる (ノイズを出さない)。
 fn stop() -> ExitCode {
     let input = read_input();
-    let open_ids = open_gate_ids(input.cwd.as_deref());
+    let cwd = input.cwd.as_deref();
+    let owox = owox_dir(cwd);
+    let work_dir = cwd.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let dirty = working_tree_dirty(cwd);
+    let open_ids = open_gate_ids(cwd);
     let open_gates = open_ids.len();
-    let dirty = working_tree_dirty(input.cwd.as_deref());
-    let work_dir = input.cwd.as_deref().unwrap_or(".");
-    // 作業ツリーの署名。直前 verify.run の署名と突き合わせ「検証済みで以降変更なし」を見る。
-    let signature = if dirty {
-        crate::files::tree_signature(Path::new(work_dir))
-    } else {
-        None
-    };
-    // 直前に verify.run を走らせた時の作業ツリー署名 (無ければ None)。
-    let verify_sig = crate::cache::read_verify_signature(&owox_dir(input.cwd.as_deref()));
-
-    // 今が直前 verify.run の内容と同一か。一致なら verify を促す checklist を出さない (合否は問わない。
-    // Stop は走らせたかの誘導で、合否強制は commit ゲートが担う)。署名を取れない時は未検証扱いへ倒す。
-    let verified_current = match (&signature, &verify_sig) {
-        (Some(sig), Some(v)) => sig == v,
-        _ => false,
-    };
-
-    // 再武装判定。前回 checklist を促した時に覚えた verify 署名と今の verify 署名を比べ、変われば
-    // (= 前回促してから verify.run が走った) 再武装する。未促しなら覚えが無く再武装扱い。これで
-    // 1 つの未検証エピソードでは高々 1 回だけ促し、編集が進むだけの毎ターンの催促を断つ。
-    let marked = read_stop_verify_marker(input.cwd.as_deref(), input.session_id.as_deref());
-    let verify_sig_str = verify_sig.as_deref().unwrap_or("");
-    let verify_rearmed = match &marked {
-        None => true,
-        Some(prev) => prev != verify_sig_str,
-    };
-    // checklist を促す条件 (core と同じ)。促した時だけ今の verify 署名を覚えて再武装を閉じる。
-    let want_checklist = dirty && !verified_current && verify_rearmed;
 
     // 未承認 gate の顔ぶれ署名 (open 来歴 ID を整列して連結)。前回促した時から変わったかを見る。
     // 同じ顔ぶれが続く間は黙り、人間待ちのゲートを毎ターン蒸し返さない。
     let gate_signature = (open_gates > 0).then(|| open_ids.join(","));
-    let last_gates = read_gate_signature(input.cwd.as_deref(), input.session_id.as_deref());
+    let last_gates = read_gate_signature(cwd, input.session_id.as_deref());
     let gates_changed = open_gates > 0 && gate_signature != last_gates;
+
+    // 変更があれば検査を機械検証する。正本を読めない時は検証を諦め gate だけ見る (作業を妨げない)。
+    let (verify, verify_fresh) = if dirty {
+        match owox_core::load_canon(&owox) {
+            Ok(canon) => cached_verify_outcome(&owox, &work_dir, &canon),
+            Err(_) => (owox_core::VerifyOutcome::NoChecks, false),
+        }
+    } else {
+        (owox_core::VerifyOutcome::NoChecks, false)
+    };
+
+    // 検査失敗で停止を保留 (ブロック) する局面か。この時は gate を表面化しないので gate 署名も覚えない。
+    let verify_blocking =
+        dirty && !input.stop_hook_active && matches!(verify, owox_core::VerifyOutcome::Failed { .. });
 
     match owox_core::stop_decision(
         input.stop_hook_active,
+        dirty,
+        &verify,
+        verify_fresh,
         open_gates,
         gates_changed,
-        dirty,
-        verified_current,
-        verify_rearmed,
     ) {
         // 受理: 出力無しで終了 (素通り)。
         owox_core::StopDecision::Accept => ExitCode::SUCCESS,
         owox_core::StopDecision::Continue { reason } => {
-            // checklist を促したなら今の verify 署名を覚え、verify.run が走るまで再び促さない。
-            if want_checklist {
-                remember_stop_verify_marker(
-                    input.cwd.as_deref(),
-                    input.session_id.as_deref(),
-                    verify_sig_str,
-                );
+            // gate の顔ぶれが変わって表面化したなら今の署名を覚え、同じ顔ぶれの間は黙る。
+            // 検査失敗で gate を出していない時は覚えない (次に通った時へ表面化を残す)。
+            if !verify_blocking && gates_changed && let Some(sig) = &gate_signature {
+                remember_gate_signature(cwd, input.session_id.as_deref(), sig);
             }
-            // gate の顔ぶれが変わって促したなら今の署名を覚え、同じ顔ぶれの間は黙る。
-            if gates_changed && let Some(sig) = &gate_signature {
-                remember_gate_signature(input.cwd.as_deref(), input.session_id.as_deref(), sig);
-            }
-            let output = StopContinue {
-                decision: "block",
-                reason: reason.clone(),
-            };
-            match serde_json::to_string(&output) {
-                Ok(json) => {
-                    println!("{json}");
-                    ExitCode::SUCCESS
-                }
-                // JSON を出せない時は継続意図を代替契約 (終了コード 2 + stderr) で伝える。
-                Err(_) => {
-                    eprintln!("{reason}");
-                    ExitCode::from(2)
-                }
-            }
+            emit_stop_continue(reason)
         }
     }
+}
+
+/// Stop を終了させず継続させる出力を stdout へ出す (`decision=block`)。reason が新しい継続プロンプト。
+fn emit_stop_continue(reason: String) -> ExitCode {
+    let output = StopContinue {
+        decision: "block",
+        reason: reason.clone(),
+    };
+    match serde_json::to_string(&output) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        // JSON を出せない時は継続意図を代替契約 (終了コード 2 + stderr) で伝える。
+        Err(_) => {
+            eprintln!("{reason}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// 検査結果を得る。直前 verify.run / commit と作業ツリーが同一なら記録した結果を再利用し、無ければ
+/// 検査をフレッシュ実行して記録する (commit ゲートと Stop が共用。署名一致 = 同一結果で二重実行を避ける)。
+/// 戻り値の bool は「この呼び出しでフレッシュ実行したか」(= 初めて見た内容か)。
+fn cached_verify_outcome(
+    owox_dir: &Path,
+    work_dir: &Path,
+    canon: &owox_core::Canon,
+) -> (owox_core::VerifyOutcome, bool) {
+    let current_sig = crate::files::tree_signature(work_dir);
+    let cached = crate::cache::read_verify_record(owox_dir);
+    if let (Some(rec), Some(sig)) = (&cached, &current_sig)
+        && rec.signature == *sig
+    {
+        let outcome = match rec.verification.as_str() {
+            "passed" => owox_core::VerifyOutcome::Passed,
+            "failed" => owox_core::VerifyOutcome::Failed {
+                failed: rec.failed.clone(),
+            },
+            // needs_human = 検査未設定 (verify.rs の判定と整合)。
+            _ => owox_core::VerifyOutcome::NoChecks,
+        };
+        return (outcome, false);
+    }
+
+    let results = owox_core::run_checks(work_dir, &canon.verify.checks);
+    let outcome = if canon.verify.checks.is_empty() {
+        owox_core::VerifyOutcome::NoChecks
+    } else if results.iter().all(|r| r.passed) {
+        owox_core::VerifyOutcome::Passed
+    } else {
+        owox_core::VerifyOutcome::Failed {
+            failed: results
+                .iter()
+                .filter(|r| !r.passed)
+                .map(|r| r.name.clone())
+                .collect(),
+        }
+    };
+    // 記録して commit ゲート・次の Stop が再利用できるようにする。
+    if let Some(sig) = current_sig {
+        let (verification, failed) = match &outcome {
+            owox_core::VerifyOutcome::Passed => ("passed".to_string(), Vec::new()),
+            owox_core::VerifyOutcome::Failed { failed } => ("failed".to_string(), failed.clone()),
+            owox_core::VerifyOutcome::NoChecks => ("needs_human".to_string(), Vec::new()),
+        };
+        crate::cache::write_verify_record(
+            owox_dir,
+            &crate::cache::VerifyRecord {
+                signature: sig,
+                verification,
+                failed,
+            },
+        );
+    }
+    (outcome, true)
 }
 
 /// 床コンテキストを additionalContext で注入する。
@@ -784,42 +800,11 @@ fn session_terms_path(cwd: Option<&str>, session_id: &str) -> PathBuf {
         .join(format!("{}.json", safe_session_id(session_id)))
 }
 
-/// session ごとの Stop 再武装マーカ。前回 checklist を促した時の verify 署名を保つ。
-fn session_stop_path(cwd: Option<&str>, session_id: &str) -> PathBuf {
-    cache_dir(cwd)
-        .join("sessions")
-        .join(format!("{}-stop.json", safe_session_id(session_id)))
-}
-
 /// session ごとの未承認 gate 署名ファイル。前回促した時の open gate の顔ぶれを保つ。
 fn session_gate_path(cwd: Option<&str>, session_id: &str) -> PathBuf {
     cache_dir(cwd)
         .join("sessions")
         .join(format!("{}-gates.json", safe_session_id(session_id)))
-}
-
-/// 前回 Stop で checklist を促した時の verify 署名。促していない (ファイル無し)・読めない時は None。
-/// None は「まだ一度も促していない」を表し再武装扱いになる。verify 未実行時に促した記録は空文字列で残る。
-fn read_stop_verify_marker(cwd: Option<&str>, session_id: Option<&str>) -> Option<String> {
-    let sid = session_id?;
-    std::fs::read_to_string(session_stop_path(cwd, sid))
-        .ok()
-        .and_then(|s| serde_json::from_str::<String>(&s).ok())
-}
-
-/// 今回 checklist を促した時の verify 署名を session キャッシュへ保存。session_id が無い・書けない時は何もしない。
-fn remember_stop_verify_marker(cwd: Option<&str>, session_id: Option<&str>, signature: &str) {
-    let Some(sid) = session_id else {
-        return;
-    };
-    ensure_cache_ignored(cwd);
-    let path = session_stop_path(cwd, sid);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string(signature) {
-        let _ = std::fs::write(&path, json);
-    }
 }
 
 /// 前回 Stop で促した時の未承認 gate 署名。session_id が無い・読めない時は None。

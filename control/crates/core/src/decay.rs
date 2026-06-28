@@ -620,6 +620,7 @@ mod tests {
             id: id.to_string(),
             title: "d".to_string(),
             status,
+            kind: None,
             rationale: String::new(),
             links: DecisionLinks::default(),
             supersedes: Vec::new(),

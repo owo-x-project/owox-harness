@@ -320,12 +320,6 @@ pub fn read_verify_record(owox_dir: &Path) -> Option<VerifyRecord> {
         .and_then(|s| serde_json::from_str::<VerifyRecord>(&s).ok())
 }
 
-/// 最後に verify.run を走らせた時の作業ツリー署名。無い・読めない時は None。
-/// Stop の「verify.run 済み・以降変更なし」判定に使う (合否は問わない)。
-pub fn read_verify_signature(owox_dir: &Path) -> Option<String> {
-    read_verify_record(owox_dir).map(|r| r.signature)
-}
-
 /// verify.run 実行時の記録 (署名 + 検査結果) を保存する。書けない時は何もしない (作業を妨げない)。
 pub fn write_verify_record(owox_dir: &Path, record: &VerifyRecord) {
     ensure_ignored(owox_dir);

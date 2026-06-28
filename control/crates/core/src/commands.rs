@@ -116,22 +116,46 @@ fn parse_commands_toml(text: &str) -> Result<Vec<Command>, String> {
         .collect())
 }
 
+/// 曖昧な要望を質問で具体化する共通指針 (grill-me)。kickoff / req / design が共有する。
+///
+/// 一度に1問・コードで分かる事は自己解決・質問種別で形を変える (`docs/decisions/20260611-方向付け.md`,
+/// `docs/decisions/20260627-判断2軸と対話kickoff.md`)。提示は `{{QUESTION_TOOL}}` プレースホルダで持ち、
+/// target 生成時に各 CLI の質問ツール名へ写像する (`crate::target::apply_question_tool`)。判断型は
+/// 推奨案を先頭の選択肢にする。正本は CLI 名を入れない (生成文はツール非依存)。
+const GRILL_GUIDANCE: &str = "Grill one point at a time to make vague intent concrete; resolve what the code already shows yourself first (context scope codebase, or scope diff when a change is in flight) and only ask what the code cannot answer. Shape each point by its kind: for an elicit point ask an open question and paste no recommendation; for a confirm point state the decision owox already made and let the human only override it; for a judge point give the recommendation, the reason, and the options. Present each point to the human {{QUESTION_TOOL}}, and for a judge point make the recommended option the first choice. When an answer stays vague, ask one sharp follow-up before moving on.";
+
 /// owox 標準コマンド (第1段階)。本文は owox 機能識別子だけを指し、CLI 名を入れない。
 ///
 /// 本文は 1 つの owox tool を命令形で呼び、ファイル直読みや代替手順を禁じる
 /// (散文の指示はモデルが別経路へ逸れる。`docs/decisions/20260613-Phase5-実機検証の是正.md`)。
 fn standard_commands() -> Vec<Command> {
+    // 質問で具体化する入口 (kickoff / req / design) は grill-me 指針を共有する。
+    let mut commands = vec![
+        Command {
+            name: "kickoff".to_string(),
+            description: "Start kickoff and surface the next setup point.".to_string(),
+            body: format!(
+                "Call mission.start with type kickoff, then call next. {GRILL_GUIDANCE} Hold product intent and safety for the human; decide and write action-axis setup yourself (project nature, indexes, setup files) without asking. Do the action owox proceeds with; do not ask the human about it. Do not read the canon files yourself."
+            ),
+        },
+        Command {
+            name: "req".to_string(),
+            description: "Draft or refine requirements the way the project's nature calls for."
+                .to_string(),
+            body: format!(
+                "Draft or refine requirements with the requirement tools. First call profile.get to see the active requirements-shape. {GRILL_GUIDANCE} If prfaq, think through the requirement as a short press release (who benefits and how) plus the key questions, and get human approval on what and why before building; if lightweight, capture a brief statement and acceptance criteria directly. Do not write the requirement until the intent is concrete. The requirement itself is the canonical record: distill what you drafted into requirement.create and requirement.add_criterion, each criterion with a verification link, rather than keeping a separate press-release document. Record the why and the benefit as a decision and link it. Tag each requirement's kind as functional or non-functional; keep technical and design constraints as decisions, not requirements. If prioritization is ideal-first, leave the priority ranking to a human. Do not read or edit requirement files under .owox/ directly."
+            ),
+        },
+        Command {
+            name: "design".to_string(),
+            description: "Work out a design decision before implementing.".to_string(),
+            body: format!(
+                "Shape a design decision before writing code. First understand the structure (context scope codebase, and scope diff when a change is in flight). {GRILL_GUIDANCE} Design choices are tradeoffs: weigh options against responsibility boundaries, dependency direction, extensibility, and cleanliness, and prefer the future-proof and clean option even when it costs more now. Hold genuine product-intent or safety forks for the human; owox may settle reversible technical tradeoffs itself. Record the chosen design and why, plus the rejected alternatives and revisit conditions, with decision.record using kind \"design\", and link it to the requirement it serves. Enforceable structural constraints (dependency direction, layer boundaries) belong in quality.toml, not prose. Keep design and technical constraints as decisions, not requirements. Do not read the canon files yourself."
+            ),
+        },
+    ];
+
     let defs: &[(&str, &str, &str)] = &[
-        (
-            "kickoff",
-            "Start kickoff and surface the next setup point.",
-            "Call mission.start with type kickoff, then call next. If you need repo shape, call context with scope codebase. If you need change evidence, call context with scope diff. Present the single point next returns, shaped by its kind: for an elicit question ask it open and paste no recommendation; for a confirm point state the decision owox already made and let the human only override it; for a judge point give the recommendation, the reason, and the options. Hold product intent and safety for the human; decide and write action-axis setup yourself (project nature, indexes, setup files) without asking. Do the action owox proceeds with; do not ask the human about it. Do not read the canon files yourself.",
-        ),
-        (
-            "req",
-            "Draft or refine requirements the way the project's nature calls for.",
-            "Draft or refine requirements with the requirement tools. First call profile.get to see the active requirements-shape: if prfaq, think through the requirement as a short press release (who benefits and how) plus the key questions, and get human approval on what and why before building; if lightweight, capture a brief statement and acceptance criteria directly. Either way the requirement itself is the canonical record: distill what you drafted into requirement.create and requirement.add_criterion, each criterion with a verification link, rather than keeping a separate press-release document. Record the why and the benefit as a decision and link it. Tag each requirement's kind as functional or non-functional; keep technical and design constraints as decisions, not requirements. If prioritization is ideal-first, leave the priority ranking to a human. Do not read or edit requirement files under .owox/ directly.",
-        ),
         (
             "next",
             "See the intent gate and the action owox proceeds with.",
@@ -183,13 +207,12 @@ fn standard_commands() -> Vec<Command> {
             "Produce a concise handoff for the following session. Call next for open gates, ready tasks, and stale items, verify.run for the current check state, context with scope diff for what changed, and branch.notes for branch-local notes. Summarize what changed, what is verified, the open decisions, ready tasks, branch notes, stale items, and the next step. Do not read the canon files yourself.",
         ),
     ];
-    defs.iter()
-        .map(|(name, description, body)| Command {
-            name: name.to_string(),
-            description: description.to_string(),
-            body: body.to_string(),
-        })
-        .collect()
+    commands.extend(defs.iter().map(|(name, description, body)| Command {
+        name: name.to_string(),
+        description: description.to_string(),
+        body: body.to_string(),
+    }));
+    commands
 }
 
 #[cfg(test)]
@@ -213,10 +236,42 @@ mod tests {
         let names: Vec<_> = standard_commands().into_iter().map(|c| c.name).collect();
         for expected in [
             "kickoff", "next", "status", "decide", "verify", "review", "task", "skill", "handoff",
-            "req", "memo",
+            "req", "memo", "design",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn intent_eliciting_commands_carry_grill_guidance() {
+        // 曖昧な要望を具体化する入口は grill-me 指針を持ち、質問提示プレースホルダ (target 生成で
+        // 質問ツール名へ写像) と判断型の推奨先頭を指示する。正本に CLI 固有ツール名は入れない。
+        let commands = standard_commands();
+        for name in ["kickoff", "req", "design"] {
+            let cmd = commands.iter().find(|c| c.name == name).unwrap();
+            assert!(
+                cmd.body.contains(crate::target::QUESTION_TOOL_PLACEHOLDER),
+                "{name} が質問提示プレースホルダを欠く"
+            );
+            assert!(
+                cmd.body.contains("recommended option the first choice"),
+                "{name} が判断型の推奨先頭指示を欠く"
+            );
+            assert!(
+                cmd.body.contains("one point at a time"),
+                "{name} が一度に1問の指針を欠く"
+            );
+            assert!(
+                !cmd.body.to_lowercase().contains("askuserquestion"),
+                "{name} の正本に CLI 固有ツール名が混入"
+            );
+        }
+    }
+
+    #[test]
+    fn grill_guidance_embeds_the_placeholder() {
+        // 指針本体とプレースホルダ定数の同期を守る (片方だけ変えても気づけるように)。
+        assert!(GRILL_GUIDANCE.contains(crate::target::QUESTION_TOOL_PLACEHOLDER));
     }
 
     #[test]

@@ -27,6 +27,11 @@ impl Target for ClaudeTarget {
         "claude"
     }
 
+    /// Claude Code は構造化質問ツール AskUserQuestion を持つ (選択肢提示・推奨先頭に向く)。
+    fn question_tool(&self) -> Option<&'static str> {
+        Some("AskUserQuestion")
+    }
+
     fn generate(&self, _canon: &Canon) -> Vec<GeneratedFile> {
         // ルート指示ファイルは生成しない。床コンテキストは SessionStart hook が注入する。
         vec![
@@ -60,7 +65,8 @@ impl Target for ClaudeTarget {
             let base = format!(".claude/skills/{}", skill.id);
             files.push(GeneratedFile {
                 path: format!("{base}/SKILL.md"),
-                contents: skill.skill_md.clone(),
+                // 質問提示プレースホルダを Claude の質問ツール (AskUserQuestion) へ写像する。
+                contents: crate::target::apply_question_tool(&skill.skill_md, self.question_tool()),
                 executable: false,
                 write: Write::Overwrite,
             });
@@ -108,7 +114,7 @@ fn render_mcp_json() -> String {
 ///   (Edit/Write/MultiEdit) と Bash 経由なので両方を matcher に含める。NotebookEdit は notebook_path で
 ///   入力形が別のため v1 は対象外 (`docs/decisions/20260621-Phase9-マルチCLI生成.md`)。
 /// - UserPromptSubmit: プロンプトに出た用語の定義と rules/brand を能動 push。
-/// - Stop: 完了前に verify・判断記録を促す。
+/// - Stop: 変更があれば検査を自動実行し、失敗なら block して修正へ向ける (通れば判断記録を促す)。
 ///
 /// owox ブロックだけの断片で持つ (write_all が MergeJson でマージし人間の他設定を残す)。
 fn render_settings_json() -> String {
@@ -229,6 +235,20 @@ mod tests {
         let md = files.iter().find(|f| f.path.ends_with("SKILL.md")).unwrap();
         // SKILL.md は横断標準の文面を verbatim で出す。
         assert!(md.contents.contains("name: tidy"));
+    }
+
+    #[test]
+    fn skill_maps_question_tool_placeholder_to_askuserquestion() {
+        // 質問提示プレースホルダを持つ skill は Claude の AskUserQuestion へ写像される。
+        let mut s = skill("kickoff", Vec::new());
+        s.skill_md = format!(
+            "---\nname: kickoff\ndescription: d\n---\n\nPresent each point {} now.\n",
+            crate::target::QUESTION_TOOL_PLACEHOLDER
+        );
+        let files = ClaudeTarget.generate_skills(&[s]);
+        let md = files.iter().find(|f| f.path.ends_with("SKILL.md")).unwrap();
+        assert!(md.contents.contains("using the AskUserQuestion tool"), "{}", md.contents);
+        assert!(!md.contents.contains(crate::target::QUESTION_TOOL_PLACEHOLDER));
     }
 
     #[test]

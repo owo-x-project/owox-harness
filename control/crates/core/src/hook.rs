@@ -950,15 +950,17 @@ pub enum StopDecision {
 
 /// Stop 時の決定。
 ///
-/// 完了前に verify・判断記録を促す (誘導)。`stop_hook_active` (既に継続済み) なら
-/// 受理してループを避ける。継続は 1 ターンにつき高々 1 回。
+/// 完了検証を機械強制する。変更があるターンの終わりに検査結果 (`verify`) を見て、失敗なら継続させ
+/// 修正へ向ける (verify.run を促すだけで AI 任せにしない)。`stop_hook_active` (既に継続済み) なら
+/// 受理してループを避ける。継続・ブロックは 1 ターンにつき高々 1 回。直せない検査 (既存失敗・flaky)
+/// で AI がスタックしトークンを浪費するのを防ぐ。直らないまま停止しても commit ゲート (`commit_gate`)
+/// が最終防壁として commit を block するので、壊れたコードは確定しない
+/// (`docs/decisions/20260627-判断2軸と対話kickoff.md` の行動軸権威化と整合)。
 ///
 /// `dirty` は作業ツリーに verify 対象の変更があるか (.owox 配下は除外して呼び出し側が判定)。
-/// `verify_rearmed` は前回 checklist を促してから verify.run が走ったか (まだ一度も促していない時も
-/// 真。呼び出し側が「前回促した時の verify 署名」と今の verify 署名を比べて判定)。未検証の変更が
-/// 続く 1 つのエピソードでは checklist を高々 1 回だけ出し、その後の連続編集では黙る。verify.run が
-/// 走ると次の未検証エピソードとして再武装し、また高々 1 回促す。これで編集が進むたび毎ターン催促
-/// される過多を断つ (合否強制は commit ゲートが担うので促しは礼儀に留める)。
+/// `verify` は検査結果 (呼び出し側が直前 verify.run / commit の署名キャッシュを再利用、無ければフレッシュ
+/// 実行)。`verify_fresh` はこの Stop で初めてこのツリーを検証したか (キャッシュ再利用でない)。新規に
+/// 検証が通った瞬間だけ判断記録を一度促し、同じ内容の連続停止では黙る (毎ターンの催促を避ける)。
 ///
 /// `open_gates` は未承認 gate の数。`gates_changed` は前回促した時から未承認 gate の顔ぶれが
 /// 変わったか (呼び出し側が open 来歴 ID の署名で判定)。open gate も「変わった時だけ」一度表面化する。
@@ -966,52 +968,58 @@ pub enum StopDecision {
 /// (狼少年化を避ける。保守 phase の commit ゲートが別途 open gate を block するので機械強制は不変)。
 /// クリーン かつ 促す変化が無いなら何もすることが無いので素通りする
 /// (`docs/handoff/20260613-Phase4対話検証で見つけた粗の改善.md`)。
-///
-/// stop は毎ターン末に発火するため検査の再実行はしない (重い)。機械強制の完了検証は
-/// commit ゲート (`commit_gate`) が担う。stop は変更の確認促しと未解決 gate の表面化に絞る。
-///
-/// `verified_current` は今の作業ツリーが直前の verify.run と同一内容か (呼び出し側が署名で判定)。
-/// true なら既に検証済みで以降変更が無いので verify を促す checklist を出さない。合否は問わない
-/// (Stop は走らせたかの誘導で、合否強制は commit ゲートが担う)。これで verify.run 後に未コミットの
-/// 変更が残るだけで毎ターン催促されるノイズを避ける。
 pub fn stop_decision(
     stop_hook_active: bool,
+    dirty: bool,
+    verify: &VerifyOutcome,
+    verify_fresh: bool,
     open_gates: usize,
     gates_changed: bool,
-    dirty: bool,
-    verified_current: bool,
-    verify_rearmed: bool,
 ) -> StopDecision {
-    if stop_hook_active {
-        return StopDecision::Accept;
+    // 検査失敗は壊れたまま停止させない。継続させ修正へ向ける。1 ターン高々 1 回 (継続済みは見送り)。
+    if !stop_hook_active
+        && dirty
+        && let VerifyOutcome::Failed { failed } = verify
+    {
+        return StopDecision::Continue {
+            reason: stop_verify_failed_reason(failed),
+        };
     }
-    // 未検証の変更があり、かつ前回促してから verify.run が走った (= 新しい未検証エピソード) 時だけ
-    // checklist を出す。同じ未検証エピソードの連続編集では再び促さず、毎ターンの催促を避ける。
-    let want_checklist = dirty && !verified_current && verify_rearmed;
-    // 未承認 gate も顔ぶれが変わった時だけ表面化する (毎ターンの蒸し返しを避ける)。
-    let want_gates = open_gates > 0 && gates_changed;
-    // 促す変化が無い (新規変更なし・gate の顔ぶれも不変) なら黙って終わる。
-    if !want_checklist && !want_gates {
+    if stop_hook_active {
         return StopDecision::Accept;
     }
 
     let mut parts: Vec<String> = Vec::new();
-    if want_checklist {
-        parts.push(STOP_CHECKLIST.to_string());
+    // 新規に検査が通った (or 検査未設定の) 瞬間だけ判断記録を一度促す。再利用 (= 既に見た内容) は黙る。
+    if dirty && verify_fresh && !matches!(verify, VerifyOutcome::Failed { .. }) {
+        parts.push(STOP_RECORD_NUDGE.to_string());
     }
-    if want_gates {
+    // 未承認 gate も顔ぶれが変わった時だけ表面化する (毎ターンの蒸し返しを避ける)。
+    if open_gates > 0 && gates_changed {
         parts.push(format!(
             "{open_gates} decision(s) are still open and awaiting human judgment; call the next tool to see them."
         ));
     }
-    StopDecision::Continue {
-        reason: parts.join(" "),
+    if parts.is_empty() {
+        StopDecision::Accept
+    } else {
+        StopDecision::Continue {
+            reason: parts.join(" "),
+        }
     }
 }
 
-/// 変更があるターンの完了前チェックリスト。継続プロンプトとして AI へ渡す。
+/// 検査失敗で停止を保留する時の継続プロンプト。失敗した検査名を添えて修正へ向ける。
+fn stop_verify_failed_reason(failed: &[String]) -> String {
+    format!(
+        "Verification failed, so this turn is held instead of finishing. Failing checks: {}. Fix the code (or the checks) — verify runs automatically again when you stop, and the commit gate blocks commits until they pass.",
+        failed.join(", ")
+    )
+}
+
+/// 検査が通ったターンの完了前リマインド。継続プロンプトとして AI へ渡す。
 /// 一時的・作業状態は decision でなく task.note へ逃がすよう誘導する (来歴の乱立を防ぐ)。
-const STOP_CHECKLIST: &str = "Before finishing this turn: run verify.run for the code you changed, and record only durable design or direction decisions with decision.record — use task.note for transient working memos. If you have already done this, you may stop.";
+const STOP_RECORD_NUDGE: &str = "Checks pass. Record only durable design or direction decisions with decision.record — use task.note for transient working memos. Then you may stop.";
 
 #[cfg(test)]
 mod tests {
@@ -1498,53 +1506,48 @@ mod tests {
         Quality::from_toml(toml).unwrap()
     }
 
+    fn failed(checks: &[&str]) -> VerifyOutcome {
+        VerifyOutcome::Failed {
+            failed: checks.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     #[test]
-    fn stop_continues_once_then_accepts() {
-        // 未検証の変更があり再武装済みなら 1 度継続、既継続なら受理。
+    fn stop_blocks_on_failed_checks_then_accepts_once_continued() {
+        // 変更があり検査が失敗したら継続させ修正へ向ける。既継続なら受理してループを避ける。
+        match stop_decision(false, true, &failed(&["cargo test"]), true, 0, false) {
+            StopDecision::Continue { reason } => assert!(reason.contains("cargo test"), "{reason}"),
+            _ => panic!("failed checks should block"),
+        }
         assert!(matches!(
-            stop_decision(false, 0, false, true, false, true),
-            StopDecision::Continue { .. }
-        ));
-        assert!(matches!(
-            stop_decision(true, 0, false, true, false, true),
+            stop_decision(true, true, &failed(&["cargo test"]), true, 0, false),
             StopDecision::Accept
         ));
     }
 
     #[test]
-    fn stop_accepts_when_dirty_but_not_rearmed() {
-        // dirty でも前回促してから verify.run が走っていなければ (再武装なし) 黙る。
-        // 同じ未検証エピソードの連続編集で毎ターン催促しない。
+    fn stop_nudges_record_once_when_checks_freshly_pass() {
+        // 新規に検査が通った瞬間だけ判断記録を一度促す。
         assert!(matches!(
-            stop_decision(false, 0, false, true, false, false),
-            StopDecision::Accept
-        ));
-    }
-
-    #[test]
-    fn stop_continues_again_after_verify_rearms() {
-        // verify.run が走り再武装されたら、次の未検証編集でまた高々 1 回促す。
-        assert!(matches!(
-            stop_decision(false, 0, false, true, false, true),
+            stop_decision(false, true, &VerifyOutcome::Passed, true, 0, false),
             StopDecision::Continue { .. }
         ));
     }
 
     #[test]
-    fn stop_accepts_when_verified_current_even_if_rearmed() {
-        // 直前に verify.run を走らせた内容のままなら checklist を出さない
-        // (verify.run 済み・以降変更なし。合否は問わない)。
+    fn stop_accepts_when_pass_is_reused() {
+        // 同じ内容を再検証 (キャッシュ再利用) して通った時は黙る。毎ターンの催促を避ける。
         assert!(matches!(
-            stop_decision(false, 0, false, true, true, true),
+            stop_decision(false, true, &VerifyOutcome::Passed, false, 0, false),
             StopDecision::Accept
         ));
     }
 
     #[test]
-    fn stop_surfaces_gates_even_when_verified_current() {
-        // verify 済みで checklist を抑えても、未決 gate の顔ぶれが変われば別途表面化する。
+    fn stop_surfaces_gates_even_when_checks_pass() {
+        // 検査が通って record 促しを抑えても、未決 gate の顔ぶれが変われば別途表面化する。
         assert!(matches!(
-            stop_decision(false, 2, true, true, true, true),
+            stop_decision(false, true, &VerifyOutcome::Passed, false, 2, true),
             StopDecision::Continue { .. }
         ));
     }
@@ -1553,7 +1556,7 @@ mod tests {
     fn stop_accepts_when_clean_and_no_open_gates() {
         // 変更なし・未決なしなら黙って終わる (ノイズを出さない)。
         assert!(matches!(
-            stop_decision(false, 0, false, false, false, false),
+            stop_decision(false, false, &VerifyOutcome::NoChecks, false, 0, false),
             StopDecision::Accept
         ));
     }
@@ -1562,7 +1565,7 @@ mod tests {
     fn stop_mentions_open_gates_when_changed() {
         // クリーンでも未決 gate の顔ぶれが変わった時は一度表面化する。
         if let StopDecision::Continue { reason } =
-            stop_decision(false, 3, true, false, false, false)
+            stop_decision(false, false, &VerifyOutcome::NoChecks, false, 3, true)
         {
             assert!(reason.contains('3'));
         } else {
@@ -1574,7 +1577,16 @@ mod tests {
     fn stop_accepts_when_open_gates_unchanged() {
         // 同じ未決 gate が続く間は黙る (人間待ちを毎ターン蒸し返さない)。
         assert!(matches!(
-            stop_decision(false, 3, false, false, false, false),
+            stop_decision(false, false, &VerifyOutcome::NoChecks, false, 3, false),
+            StopDecision::Accept
+        ));
+    }
+
+    #[test]
+    fn stop_does_not_nudge_record_when_checks_fail_but_already_continued() {
+        // 既継続で検査失敗のままなら受理 (1 ターン高々 1 回。直せない検査でのスタックを防ぐ)。
+        assert!(matches!(
+            stop_decision(true, true, &failed(&["x"]), true, 0, false),
             StopDecision::Accept
         ));
     }

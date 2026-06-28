@@ -32,8 +32,8 @@ use owox_core::{
     approve_gate, approve_gate_auto, close_task, create_requirement, create_task, drop_task,
     get_decision, get_requirement, glossary_lookup, is_ready, link_task, link_verification,
     list_decisions, list_gates, list_requirements, list_requirements_envelope,
-    list_skills_envelope, list_tasks, list_tasks_envelope, promote_skill, record_decision,
-    register_skill, remember, review_lenses_envelope, run_code_decay, run_decay, run_quality,
+    list_skills_envelope, list_tasks, list_tasks_envelope, promote_skill, register_skill,
+    remember, review_lenses_envelope, run_code_decay, run_decay, run_quality,
     run_verify, set_state, update_requirement, update_task,
 };
 
@@ -64,6 +64,10 @@ struct DecisionRecordParams {
     /// 置き換える過去の判断 ID。
     #[serde(default)]
     supersedes: Vec<String>,
+    /// 判断の種類: design / direction / policy。省略可。design は構造・責務・依存方向の選択を
+    /// first-class に分類し、要件↔設計↔作業↔検証 のトレースで設計ノードを立てる。
+    #[serde(default)]
+    kind: Option<String>,
     /// guarded 層で操作前ゲートに止められた時、人間承認後に触れるようにする repo 相対パス。
     /// 人間が gate.approve すると、列挙したパスへの削除・契約面編集を操作前ゲートが 1 回だけ通す。
     #[serde(default)]
@@ -855,6 +859,13 @@ impl OwoxServer {
             Ok(s) => s,
             Err(err) => return self.envelope_result(Envelope::failed(err)),
         };
+        let kind = match p.kind.as_deref() {
+            None | Some("") => None,
+            Some(k) => match owox_core::DecisionKind::parse(k) {
+                Ok(k) => Some(k),
+                Err(err) => return self.envelope_result(Envelope::failed(err)),
+            },
+        };
         let input = RecordInput {
             title: p.title,
             status,
@@ -866,17 +877,15 @@ impl OwoxServer {
             },
             supersedes: p.supersedes,
         };
-        // authorizes 付きは guarded 層の解凍ゲートとして記録する (承認時に層ゲートが 1 回通す)。
-        if p.authorizes.is_empty() {
-            self.envelope_result(record_decision(&self.owox_dir, &today_utc(), input))
-        } else {
-            self.envelope_result(owox_core::record_decision_with_authorization(
-                &self.owox_dir,
-                &today_utc(),
-                input,
-                p.authorizes,
-            ))
-        }
+        // 種類タグと解凍パスを紐づけて記録する (authorizes は guarded 層の解凍ゲート。
+        // 承認時に層ゲートが 1 回通す)。
+        self.envelope_result(owox_core::record_decision_with_kind(
+            &self.owox_dir,
+            &today_utc(),
+            input,
+            kind,
+            p.authorizes,
+        ))
     }
 
     /// 来歴の全文を構造化して返す (canon 直読み禁止の読み口)。
@@ -1566,6 +1575,12 @@ impl OwoxServer {
                 );
                 env.next_actions = next;
             }
+        }
+        // mission の焦点を verify.run の次の手の先頭に置く (検査結果自体は mission 不問で一貫)。
+        if let Some(lead) = verify_mission_lead(self.mission()) {
+            let mut next = env.next_actions.clone();
+            next.insert(0, lead.to_string());
+            env.next_actions = next;
         }
         let gardening = build_gardening_findings(
             &self.owox_dir,
@@ -5017,7 +5032,10 @@ fn build_kickoff_questions(
 /// (`docs/decisions/20260627-判断2軸と対話kickoff.md`)。種別で質問の形を変え、引き出しには推奨を貼らない。
 fn render_kickoff_next(questions: &[KickoffQuestion]) -> String {
     let mut out = String::from("# What to decide next\n\n");
-    out.push_str("Kickoff mission is active. Resolve one setup point before implementation.\n\n");
+    out.push_str("Kickoff mission is active. Resolve one setup point before implementation.\n");
+    out.push_str(
+        "Present this point to the human through your client's interactive question tool when it has one, otherwise ask in plain text; for a judge point make the recommended option the first choice.\n\n",
+    );
     let Some(question) = questions.first() else {
         out.push_str("No unresolved kickoff point remains.\n\n");
         out.push_str("## Action (owox proceeds)\n\n");
@@ -5142,19 +5160,22 @@ fn render_next(
     };
 
     let mut out = String::from("# What to decide next\n\n");
+    // mission は行動軸 (owox が今すぐやること) の焦点を切り替える。看板一行でなく、下の Action と
+    // 空状態の扱いまで mission の作業へ寄せる (`docs/decisions/20260628-任務別行動軸.md`)。
+    let mission_lead = mission_lead_action(mission);
     match mission {
         crate::cache::Mission::Kickoff => out.push_str(
             "Kickoff mission is active. Prioritize unresolved setup decisions before implementation.\n\n",
         ),
-        crate::cache::Mission::Review => {
-            out.push_str("Review mission is active. Prioritize inspection and findings.\n\n")
-        }
-        crate::cache::Mission::Verify => {
-            out.push_str("Verify mission is active. Prioritize checks and completion evidence.\n\n")
-        }
-        crate::cache::Mission::Handoff => {
-            out.push_str("Handoff mission is active. Prioritize verified state and open decisions.\n\n")
-        }
+        crate::cache::Mission::Review => out.push_str(
+            "Review mission is active. Inspect the change and record findings; owox does not start new feature work here.\n\n",
+        ),
+        crate::cache::Mission::Verify => out.push_str(
+            "Verify mission is active. Drive the change to verified completion.\n\n",
+        ),
+        crate::cache::Mission::Handoff => out.push_str(
+            "Handoff mission is active. Summarize verified state and open decisions for the next session.\n\n",
+        ),
         crate::cache::Mission::Work => {}
     }
     if open.is_empty()
@@ -5171,6 +5192,11 @@ fn render_next(
         out.push_str(
             "Nothing is open, no task is ready, every accepted requirement has a verification trace, and nothing is decaying.\n",
         );
+        // mission は保留が無くても自分の作業を断定で指示する (非 Work mission を看板倒れにしない)。
+        if let Some(lead) = mission_lead {
+            out.push_str("\n## Action (owox proceeds)\n\n");
+            out.push_str(&format!("- {lead}\n"));
+        }
         return out;
     }
     // next は 2 区画で返す: 人間が握る製品意図の gate (open decisions / requirements to prioritize) と、
@@ -5217,7 +5243,12 @@ fn render_next(
                     " [non-guarded: approve with gate.auto_approve while automatic approval is on, otherwise gate.approve]"
                 }
             };
-            out.push_str(&format!("- {} ({}){}", d.title, d.id, gate_tag));
+            // 種類タグ (design 等) を添え、設計判断を一覧で見分けられるようにする。
+            let kind_tag = d
+                .kind
+                .map(|k| format!(" [kind: {}]", k.as_str()))
+                .unwrap_or_default();
+            out.push_str(&format!("- {} ({}){}{}", d.title, d.id, kind_tag, gate_tag));
             if !d.rationale.trim().is_empty() {
                 out.push_str(&format!(": {}", d.rationale.trim()));
             }
@@ -5293,6 +5324,10 @@ fn render_next(
     // 行動軸: owox が今すぐやることを断定で示す (打診しない・即興しない)。
     // 製品意図 gate (open decisions / prioritization) は人間が握るのでここには含めない。
     let mut owox_actions: Vec<&str> = Vec::new();
+    // mission の焦点を先頭に置く (Review/Verify/Handoff は何をするか自体が変わる)。
+    if let Some(lead) = mission_lead {
+        owox_actions.push(lead);
+    }
     if !ready.is_empty() {
         owox_actions
             .push("Pick up a ready task above and implement it; owox does not ask which to start.");
@@ -5319,6 +5354,41 @@ fn render_next(
         out.push('\n');
     }
     out
+}
+
+/// mission の行動軸の先頭 (owox が今すぐやること・断定形)。Work / Kickoff は None
+/// (Work は既定で焦点なし・Kickoff は専用の render_kickoff_next が担う)。
+fn mission_lead_action(mission: crate::cache::Mission) -> Option<&'static str> {
+    match mission {
+        crate::cache::Mission::Review => Some(
+            "Inspect the change: call context scope diff for the diff map, then record findings as decision.record (issues) and task.create (follow-ups). Stay in inspection; owox does not start new feature work in this mission.",
+        ),
+        crate::cache::Mission::Verify => Some(
+            "Drive completion: call verify.run, then link untraced acceptance criteria to checks with requirement.update until every accepted requirement traces, and confirm the work scope.",
+        ),
+        crate::cache::Mission::Handoff => Some(
+            "Prepare the handoff: summarize verified state and open decisions, capture remaining work with task.create, and write the handoff with the handoff skill.",
+        ),
+        crate::cache::Mission::Work | crate::cache::Mission::Kickoff => None,
+    }
+}
+
+/// verify.run の次の手の先頭へ置く mission 焦点。検査結果自体は mission 不問で一貫させ、
+/// どこへ向けるかだけを切り替える (`docs/decisions/20260628-任務別行動軸.md`)。
+/// Kickoff は別経路 (未決質問) が担うのでここでは出さない。
+fn verify_mission_lead(mission: crate::cache::Mission) -> Option<&'static str> {
+    match mission {
+        crate::cache::Mission::Review => Some(
+            "Review mission: turn the quality, decay, and reference findings above into recorded findings (decision.record / task.create) rather than fixing them inline.",
+        ),
+        crate::cache::Mission::Verify => Some(
+            "Verify mission: this is the centerpiece — close every untraced requirement and confirm work and requirement completion before leaving the mission.",
+        ),
+        crate::cache::Mission::Handoff => Some(
+            "Handoff mission: carry this verified state and any open decisions into the handoff summary for the next session.",
+        ),
+        crate::cache::Mission::Work | crate::cache::Mission::Kickoff => None,
+    }
 }
 
 /// 育てられる手順を描く。上位3件を挙げ、スキルライフサイクルへ案内する (advisory)。
@@ -5608,6 +5678,7 @@ mod tests {
             id: "dec-1".to_string(),
             title: "trace decision".to_string(),
             status: DecisionStatus::Open,
+            kind: None,
             rationale: String::new(),
             links: owox_core::DecisionLinks::default(),
             supersedes: Vec::new(),
@@ -5860,6 +5931,54 @@ mod tests {
         assert!(out.contains("nothing is decaying"));
     }
 
+    fn empty_next(mission: crate::cache::Mission) -> String {
+        render_next(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            owox_core::Axes::default(),
+            AutoApproval {
+                profile: false,
+                session: false,
+            },
+            mission,
+        )
+    }
+
+    #[test]
+    fn next_in_review_mission_leads_inspection_even_when_clean() {
+        // 非 Work mission は保留が無くても自分の作業を断定で指示する (看板倒れを防ぐ)。
+        let out = empty_next(crate::cache::Mission::Review);
+        assert!(out.contains("Review mission is active"));
+        assert!(out.contains("## Action (owox proceeds)"), "{out}");
+        assert!(out.contains("context scope diff"), "{out}");
+    }
+
+    #[test]
+    fn next_in_verify_mission_leads_completion_even_when_clean() {
+        let out = empty_next(crate::cache::Mission::Verify);
+        assert!(out.contains("Drive completion"), "{out}");
+        assert!(out.contains("## Action (owox proceeds)"));
+    }
+
+    #[test]
+    fn next_in_handoff_mission_leads_handoff_even_when_clean() {
+        let out = empty_next(crate::cache::Mission::Handoff);
+        assert!(out.contains("write the handoff"), "{out}");
+    }
+
+    #[test]
+    fn next_in_work_mission_stays_silent_when_clean() {
+        // Work は焦点を持たないので、保留が無ければ Action を出さない (ノイズを出さない)。
+        let out = empty_next(crate::cache::Mission::Work);
+        assert!(out.contains("nothing is decaying"));
+        assert!(!out.contains("## Action (owox proceeds)"), "{out}");
+    }
+
     #[test]
     fn next_announces_open_auto_window() {
         // session 窓 (auto_session=true) の文言。
@@ -5916,6 +6035,7 @@ mod tests {
             id: "20260619-x".to_string(),
             title: "Proposed practice".to_string(),
             status: DecisionStatus::Adopted,
+            kind: None,
             rationale: "from a correction".to_string(),
             links: owox_core::DecisionLinks::default(),
             supersedes: Vec::new(),
@@ -5952,6 +6072,7 @@ mod tests {
             id: "20260619-p".to_string(),
             title: "Proposed practice from correction".to_string(),
             status: DecisionStatus::Open,
+            kind: None,
             rationale: "from a correction".to_string(),
             links: owox_core::DecisionLinks::default(),
             supersedes: Vec::new(),
@@ -5972,6 +6093,7 @@ mod tests {
             id: "20260619-q".to_string(),
             title: "Plain open decision".to_string(),
             status: DecisionStatus::Open,
+            kind: None,
             rationale: String::new(),
             links: owox_core::DecisionLinks::default(),
             supersedes: Vec::new(),
@@ -6617,6 +6739,7 @@ mod tests {
             id: id.to_string(),
             title: id.to_string(),
             status: DecisionStatus::Adopted,
+            kind: None,
             rationale: String::new(),
             links: owox_core::DecisionLinks::default(),
             supersedes: Vec::new(),
