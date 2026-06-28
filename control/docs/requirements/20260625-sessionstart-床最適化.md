@@ -11,6 +11,9 @@
 
 床は薄い地図にし、詳しい導線は skill へ寄せ、実動作は tool へ寄せる。
 
+床構成（何を注入するか・索引・向き付けの出し方）は行動軸。owox が断定して定める。
+詳細は `docs/decisions/20260627-判断2軸と対話kickoff.md`。
+
 ## 目的
 
 - `SessionStart` の常時文脈を軽くする
@@ -56,7 +59,7 @@
 
 ```text
 Use kickoff to orient.
-Use next to choose work.
+Use next to see the intent gate (human decides) and the action owox asserts.
 Use context to find what to read.
 Use verify before finishing.
 Use review to inspect changes.
@@ -68,6 +71,8 @@ Use rules.lookup, glossary.lookup, practice.lookup when terms or rules matter.
    - 1行だけ
    - open decisions / ready tasks / stale items などの有無
    - 詳細は `next`
+   - `next` は 2 つを分けて返す。次に人間が決める製品意図（gate）と、AI が今すぐやる行動（owox が断定）
+   - 床はこの向き付けを owox が断定して示す。打診・即興しない
 
 `SessionStart` から落とすもの:
 
@@ -88,7 +93,7 @@ Use rules.lookup, glossary.lookup, practice.lookup when terms or rules matter.
 - `$status`: `next` + 必要なら `verify.run`
 - `$skill`: `skill.list` + routine / script-skill の扱い
 - `$verify`: `verify.run`
-- `$next`: `next` + 必要なら `context scope="diff"`
+- `$next`: `next`（製品意図 gate と owox 断定の行動を分けて提示）+ 必要なら `context scope="diff"`
 - `$kickoff`: 最後に薄い床を補う厚い導入
 
 ## 実現方針
@@ -108,6 +113,7 @@ Use rules.lookup, glossary.lookup, practice.lookup when terms or rules matter.
 - `$review` が `context scope="diff"` まで導線を持つ
 - `$skill` が script-skill 導線を持つ
 - kickoff を使わなくても最低限迷わない
+- `next` と床の向き付けが、製品意図 gate と owox 断定の行動を分けて出す
 
 ## 未決事項
 

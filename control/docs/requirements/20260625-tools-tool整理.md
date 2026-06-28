@@ -9,6 +9,8 @@
 MCP tool 数は増えている。tool 自体は実体なので細かく分かれていてもよいが、AI が選ぶ面で迷うと導線が弱くなる。
 物理削除より先に、入口 skill と `SessionStart` での見せ方を整理する。
 
+tool をどれをいつ使うかは行動軸（`docs/decisions/20260627-判断2軸と対話kickoff.md`）。owox が断定的に示し、AI は人間へ tool 選択を打診しない。本整理はその断定導線を整える作業であり、人間 gate は製品意図正本・安全境界・不可逆操作のみに掛ける。
+
 ## 目的
 
 - AI が tool 選択で迷わない
@@ -75,8 +77,8 @@ tool をカテゴリで扱う。
 
 ## 入口 skill
 
-- `$next`: `next` → 必要なら `context scope="diff"`
-- `$status`: `next` → `verify.run` → gate 要約
+- `$next`: `next` → 必要なら `context scope="diff"`。`next` は人間 gate（製品意図）と owox 断定の次行動を分けて返す
+- `$status`: `next` → `verify.run` → gate 要約。次行動は断定形で示す
 - `$review`: `review.lenses` → `verify.run` → `context scope="diff"`
 - `$verify`: `verify.run`
 - `$skill`: `skill.list` → routine / script-skill → `skill.register` / `skill.promote`

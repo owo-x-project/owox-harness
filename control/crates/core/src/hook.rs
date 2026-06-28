@@ -45,7 +45,9 @@ pub fn floor_context(canon: &Canon) -> String {
 
     out.push_str("## Entry map\n\n");
     out.push_str("- Use kickoff to orient.\n");
-    out.push_str("- Use next to choose work.\n");
+    out.push_str(
+        "- Use next to see the intent gate (the human decides) and the action owox asserts.\n",
+    );
     out.push_str("- Use context to find what to read.\n");
     out.push_str("- Use verify before finishing.\n");
     out.push_str("- Use review to inspect changes.\n");
@@ -1670,7 +1672,7 @@ mod tests {
         assert!(out.contains("Do not read or edit the canon"));
         assert!(out.contains("## Entry map"));
         assert!(out.contains("Use kickoff to orient"));
-        assert!(out.contains("Use next to choose work"));
+        assert!(out.contains("Use next to see the intent gate"));
         assert!(out.contains("Use context to find what to read"));
         assert!(out.contains("Use verify before finishing"));
         assert!(out.contains("Use review to inspect changes"));
@@ -1849,7 +1851,7 @@ mod tests {
         // 読みは tool 一本化。owox:// resource でなく context/next tool へ誘導する。
         let out = floor_context(&canon_with_glossary(&[]));
         assert!(out.contains("Use context to find what to read"));
-        assert!(out.contains("Use next to choose work"));
+        assert!(out.contains("Use next to see the intent gate"));
         assert!(!out.contains("owox://"));
     }
 

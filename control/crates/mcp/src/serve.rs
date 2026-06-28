@@ -757,6 +757,9 @@ impl OwoxServer {
             let tasks = list_tasks(&self.owox_dir).map_err(|err| {
                 McpError::internal_error(format!("タスクを読めない: {err}"), None)
             })?;
+            let requirements = list_requirements(&self.owox_dir).map_err(|err| {
+                McpError::internal_error(format!("要件を読めない: {err}"), None)
+            })?;
             if let Some(obj) = data.as_object_mut() {
                 obj.insert(
                     "kickoff".to_string(),
@@ -765,6 +768,7 @@ impl OwoxServer {
                         self.repo_root(),
                         &canon,
                         &decisions,
+                        &requirements,
                         &tasks,
                     ),
                 );
@@ -956,11 +960,15 @@ impl OwoxServer {
                     let tasks = list_tasks(&self.owox_dir).map_err(|err| {
                         McpError::internal_error(format!("タスクを読めない: {err}"), None)
                     })?;
+                    let requirements = list_requirements(&self.owox_dir).map_err(|err| {
+                        McpError::internal_error(format!("要件を読めない: {err}"), None)
+                    })?;
                     render_kickoff_context(
                         self.repo_root(),
                         &self.owox_dir,
                         &canon,
                         &decisions,
+                        &requirements,
                         &tasks,
                     )
                 } else {
@@ -997,8 +1005,14 @@ impl OwoxServer {
         if self.mission() == crate::cache::Mission::Kickoff
             && let Some(canon) = canon.as_ref()
         {
-            let questions =
-                build_kickoff_questions(&self.owox_dir, repo_root, canon, &decisions, &tasks);
+            let questions = build_kickoff_questions(
+                &self.owox_dir,
+                repo_root,
+                canon,
+                &decisions,
+                &requirements,
+                &tasks,
+            );
             return Ok(self.text_result(render_kickoff_next(&questions)));
         }
         // 腐敗検知の閾値は quality.toml の [decay]。正本が読めない時は警告を出さない (作業を妨げない)。
@@ -1526,10 +1540,23 @@ impl OwoxServer {
             merge_data(
                 &mut env,
                 "kickoff",
-                kickoff_status_json(&self.owox_dir, work_dir, &canon, &decisions, &tasks),
+                kickoff_status_json(
+                    &self.owox_dir,
+                    work_dir,
+                    &canon,
+                    &decisions,
+                    &requirements,
+                    &tasks,
+                ),
             );
-            let questions =
-                build_kickoff_questions(&self.owox_dir, work_dir, &canon, &decisions, &tasks);
+            let questions = build_kickoff_questions(
+                &self.owox_dir,
+                work_dir,
+                &canon,
+                &decisions,
+                &requirements,
+                &tasks,
+            );
             if !questions.is_empty() {
                 let mut next = env.next_actions.clone();
                 next.insert(
@@ -1892,7 +1919,7 @@ impl OwoxServer {
             "vision": vision,
             "phase": phase,
             "nature": nature,
-            "next": "Call the next tool for open decisions and ready tasks, and the context tool for what to read.",
+            "next": "Call next for the one setup point to resolve: it returns a question kind (引き出し / 確認 / 判断) plus the action owox proceeds with. Call context for what to read. owox decides action-axis setup (profile / indexes); the human holds product intent and safety.",
         });
         if let Some(g) = guardrails {
             data["adopting_existing_code"] = serde_json::json!({
@@ -2572,13 +2599,50 @@ struct GardeningFinding {
     detail: String,
 }
 
-#[derive(Clone)]
+/// kickoff の質問種別 (`docs/decisions/20260627-判断2軸と対話kickoff.md`)。
+///
+/// 引き出し=製品意図を開いて聞く (推奨を貼らない)。確認=owox が決めた行動軸を提示し否認/修正だけ。
+/// 判断=人間しか決められない意図/安全の分岐 (推奨+理由+選択肢)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuestionKind {
+    Elicit,
+    Confirm,
+    Judge,
+}
+
+impl QuestionKind {
+    /// 人間向け表示ラベル。
+    fn label(self) -> &'static str {
+        match self {
+            QuestionKind::Elicit => "引き出し",
+            QuestionKind::Confirm => "確認",
+            QuestionKind::Judge => "判断",
+        }
+    }
+
+    /// JSON 用の安定キー。
+    fn key(self) -> &'static str {
+        match self {
+            QuestionKind::Elicit => "elicit",
+            QuestionKind::Confirm => "confirm",
+            QuestionKind::Judge => "judge",
+        }
+    }
+}
+
+/// kickoff で 1 ターンに 1 件返す質問。種別で形が変わる。
 struct KickoffQuestion {
     stage: &'static str,
+    kind: QuestionKind,
+    /// 引き出し=聞くこと・確認=決めたこと・判断=決めること。
     item: String,
-    recommendation: String,
+    /// 確認のとき owox が決めた値 (行動軸)。
+    decided: Option<String>,
+    /// 判断のときの推奨案 (それ以外では付けない)。
+    recommendation: Option<String>,
+    /// 根拠 / 理由。
     reason: String,
-    decider: &'static str,
+    /// 判断のときの選択肢 (それ以外では空)。
     options: Vec<String>,
 }
 
@@ -4539,7 +4603,8 @@ fn mission_preview(
     if mission == crate::cache::Mission::Kickoff {
         let fallback = owox_core::Canon::default();
         let canon = canon.as_ref().unwrap_or(&fallback);
-        let questions = build_kickoff_questions(owox_dir, repo_root, canon, &decisions, &tasks);
+        let questions =
+            build_kickoff_questions(owox_dir, repo_root, canon, &decisions, &requirements, &tasks);
         return Some(render_kickoff_next(&questions));
     }
     let axes = canon
@@ -4568,9 +4633,11 @@ fn render_kickoff_context(
     owox_dir: &Path,
     canon: &owox_core::Canon,
     decisions: &[owox_core::Decision],
+    requirements: &[owox_core::Requirement],
     tasks: &[Task],
 ) -> String {
-    let questions = build_kickoff_questions(owox_dir, repo_root, canon, decisions, tasks);
+    let questions =
+        build_kickoff_questions(owox_dir, repo_root, canon, decisions, requirements, tasks);
     let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
     let signals = owox_core::DetectSignals {
         files: &files,
@@ -4606,9 +4673,22 @@ fn render_kickoff_context(
     } else {
         out.push_str(&format!("- unresolved questions: {}\n", questions.len()));
         for question in questions.iter().take(5) {
+            let detail = match question.kind {
+                QuestionKind::Confirm => {
+                    question.decided.clone().unwrap_or_else(|| question.item.clone())
+                }
+                QuestionKind::Judge => question
+                    .recommendation
+                    .clone()
+                    .unwrap_or_else(|| question.item.clone()),
+                QuestionKind::Elicit => question.item.clone(),
+            };
             out.push_str(&format!(
-                "- {} / {}: {} ({})\n",
-                question.stage, question.item, question.recommendation, question.decider
+                "- {} [{}] {}: {}\n",
+                question.stage,
+                question.kind.label(),
+                question.item,
+                detail
             ));
             out.push_str(&format!("  reason: {}\n", question.reason));
         }
@@ -4705,13 +4785,16 @@ fn kickoff_status_json(
     repo_root: &Path,
     canon: &owox_core::Canon,
     decisions: &[owox_core::Decision],
+    requirements: &[owox_core::Requirement],
     tasks: &[Task],
 ) -> serde_json::Value {
-    let questions = build_kickoff_questions(owox_dir, repo_root, canon, decisions, tasks);
+    let questions =
+        build_kickoff_questions(owox_dir, repo_root, canon, decisions, requirements, tasks);
     serde_json::json!({
         "unresolved": questions.len(),
-        "ai_drafts": questions.iter().filter(|q| q.decider == "ai").count(),
-        "human_decisions": questions.iter().filter(|q| q.decider == "human").count(),
+        // owox が決める行動軸 (確認) と、人間が握る製品意図 / 安全 (引き出し+判断) で分ける。
+        "ai_drafts": questions.iter().filter(|q| q.kind == QuestionKind::Confirm).count(),
+        "human_decisions": questions.iter().filter(|q| q.kind != QuestionKind::Confirm).count(),
         "next_question": questions.first().map(kickoff_question_json),
         "ready_to_return": questions.is_empty(),
         "canonicalization_candidates": kickoff_candidates_json(owox_dir, repo_root, canon, tasks),
@@ -4793,28 +4876,37 @@ fn kickoff_candidates_json(
     out
 }
 
+/// kickoff の質問を優先順 (`docs/requirements/20260625-mission-kickoff.md` の優先順位) で組む。
+///
+/// 判断 2 軸で種別を振る (`docs/decisions/20260627-判断2軸と対話kickoff.md`):
+/// 製品意図軸 (目的・安全境界・未決) は人間へ引き出し/判断、行動軸 (profile・検証入口・初期 task) は
+/// owox が決めて確認に回す。先頭が次に詰める 1 件になるよう優先順に積む。
 fn build_kickoff_questions(
     owox_dir: &Path,
     repo_root: &Path,
     canon: &owox_core::Canon,
     decisions: &[owox_core::Decision],
+    requirements: &[owox_core::Requirement],
     tasks: &[Task],
 ) -> Vec<KickoffQuestion> {
     let mut out = Vec::new();
+
+    // 1. 後続を止める未決 (open decision)。人間しか確定できないので判断。
     for decision in decisions
         .iter()
         .filter(|decision| decision.status == DecisionStatus::Open)
     {
         out.push(KickoffQuestion {
-            stage: "入口確認",
+            stage: "未決",
+            kind: QuestionKind::Judge,
             item: format!("未決の判断 {} を確定する", decision.title),
-            recommendation: "いま人間が確定".to_string(),
+            decided: None,
+            recommendation: Some("いま人間が確定".to_string()),
             reason: if decision.rationale.trim().is_empty() {
                 "open decision が残ると後続が止まりやすい".to_string()
             } else {
                 decision.rationale.trim().to_string()
             },
-            decider: "human",
             options: vec![
                 "adopt".to_string(),
                 "reject".to_string(),
@@ -4823,14 +4915,52 @@ fn build_kickoff_questions(
         });
     }
 
-    if !profile_declared_at(owox_dir) {
-        let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
-        let draft = owox_core::detect_profile(&owox_core::DetectSignals {
-            files: &files,
-            has_quality_layers,
-            has_version_tags,
+    // 2. 製品意図がまだ正本に無いなら、目的を開いて聞く (引き出し・推奨を貼らない)。
+    // owox はこれを代わりに決めない (製品意図軸)。
+    if requirements.is_empty() {
+        out.push(KickoffQuestion {
+            stage: "目的",
+            kind: QuestionKind::Elicit,
+            item: "この repo で何を達成したい? 誰のため? 成功条件は?".to_string(),
+            decided: None,
+            recommendation: None,
+            reason: "製品意図がまだ正本に無い。owox は代わりに決めない".to_string(),
+            options: Vec::new(),
         });
-        let recommendation = draft
+    }
+
+    let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
+    let signals = owox_core::DetectSignals {
+        files: &files,
+        has_quality_layers,
+        has_version_tags,
+    };
+
+    // 3. 安全境界 (製品意図軸)。検出ガードレール案の採否は人間判断。
+    let canon_draft = owox_core::detect_canon_draft(&signals);
+    let thin_guardrails = canon.quality.layers.is_empty()
+        && canon.quality.boundaries.is_empty()
+        && canon.rules.irreversible.is_empty();
+    if thin_guardrails && !canon_draft.is_empty() {
+        out.push(KickoffQuestion {
+            stage: "安全境界",
+            kind: QuestionKind::Judge,
+            item: "初期ガードレール案を採るか決める".to_string(),
+            decided: None,
+            recommendation: Some("検出案を初期値として採る".to_string()),
+            reason: "既存コードから層・境界・不可逆操作の案が取れている".to_string(),
+            options: vec![
+                "検出案を採る".to_string(),
+                "一部だけ採る".to_string(),
+                "手で決める".to_string(),
+            ],
+        });
+    }
+
+    // 4. project nature (行動軸)。owox が draft を決め、人間は否認/修正だけ (確認)。
+    if !profile_declared_at(owox_dir) {
+        let draft = owox_core::detect_profile(&signals);
+        let decided = draft
             .suggested_preset
             .clone()
             .unwrap_or_else(|| "clean-arch-app".to_string());
@@ -4843,100 +4973,127 @@ fn build_kickoff_questions(
         .join("; ");
         out.push(KickoffQuestion {
             stage: "作業の型",
+            kind: QuestionKind::Confirm,
             item: "project nature を決める".to_string(),
-            recommendation,
+            decided: Some(format!("project nature = {decided}")),
+            recommendation: None,
             reason,
-            decider: "human",
-            options: owox_core::builtin_bundle_names()
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect(),
+            options: Vec::new(),
         });
     }
 
-    let (files, has_quality_layers, has_version_tags) = detect_inputs(repo_root, owox_dir);
-    let canon_draft = owox_core::detect_canon_draft(&owox_core::DetectSignals {
-        files: &files,
-        has_quality_layers,
-        has_version_tags,
-    });
-    let thin_guardrails = canon.quality.layers.is_empty()
-        && canon.quality.boundaries.is_empty()
-        && canon.rules.irreversible.is_empty();
-    if thin_guardrails && !canon_draft.is_empty() {
-        out.push(KickoffQuestion {
-            stage: "安全境界",
-            item: "初期ガードレール案を採るか決める".to_string(),
-            recommendation: "検出案を初期値として採る".to_string(),
-            reason: "既存コードから層・境界・不可逆操作の案が取れている".to_string(),
-            decider: "human",
-            options: vec![
-                "検出案を採る".to_string(),
-                "一部だけ採る".to_string(),
-                "手で決める".to_string(),
-            ],
-        });
-    }
-
-    let checks = detect_checks(&detect_package_files(&crate::files::list_repo_files(
-        repo_root,
-    )));
+    // 5. 最初の検証入口 (行動軸)。owox が検出した入口を決め、人間は確認だけ。
+    let checks = detect_checks(&detect_package_files(&files));
     if canon.verify.checks.is_empty() && !checks.is_empty() {
         out.push(KickoffQuestion {
             stage: "作業の型",
+            kind: QuestionKind::Confirm,
             item: "最初の検証入口を決める".to_string(),
-            recommendation: checks[0].clone(),
+            decided: Some(format!("検証入口 = {}", checks[0])),
+            recommendation: None,
             reason: "repo から既存の test / build 入口が見えている".to_string(),
-            decider: "human",
-            options: checks,
+            options: Vec::new(),
         });
     }
 
+    // 6. 初期 task の分割 (行動軸)。owox が初手を仮決定して切り、人間は確認だけ。
+    // 優先順位は製品意図軸なので、ここでは扱わず work へ戻った後に判断へ回す。
     if tasks.is_empty() {
         out.push(KickoffQuestion {
             stage: "初期 task",
+            kind: QuestionKind::Confirm,
             item: "最初の task 分割".to_string(),
-            recommendation: "AI仮決定".to_string(),
+            decided: Some("owox が初手を仮決定して切る".to_string()),
+            recommendation: None,
             reason: "repo 構造と未決一覧から初手は機械的に切りやすい".to_string(),
-            decider: "ai",
-            options: vec!["AI仮決定".to_string(), "人間が先に決める".to_string()],
+            options: Vec::new(),
         });
     }
 
     out
 }
 
+/// kickoff の `next`。製品意図 gate (人間が決める) と owox が今すぐやる行動 (行動軸・断定) を分けて返す
+/// (`docs/decisions/20260627-判断2軸と対話kickoff.md`)。種別で質問の形を変え、引き出しには推奨を貼らない。
 fn render_kickoff_next(questions: &[KickoffQuestion]) -> String {
     let mut out = String::from("# What to decide next\n\n");
-    out.push_str(
-        "Kickoff mission is active. Resolve one setup decision before implementation.\n\n",
-    );
+    out.push_str("Kickoff mission is active. Resolve one setup point before implementation.\n\n");
     let Some(question) = questions.first() else {
-        out.push_str("No unresolved kickoff decision remains.\n\n");
-        out.push_str("Decide whether to switch the mission back to work.\n");
+        out.push_str("No unresolved kickoff point remains.\n\n");
+        out.push_str("## Action (owox proceeds)\n\n");
+        out.push_str("- Switch the mission back to work with mission.start type=\"work\".\n");
         return out;
     };
-    out.push_str(&format!("Stage: {}\n", question.stage));
-    out.push_str(&format!("Decide: {}\n", question.item));
-    out.push_str(&format!("Recommended: {}\n", question.recommendation));
-    out.push_str(&format!("Reason: {}\n", question.reason));
-    out.push_str(&format!("Decider: {}\n", question.decider));
-    out.push_str("Options:\n");
-    for option in &question.options {
-        out.push_str(&format!("- {option}\n"));
+    out.push_str(&format!("種別: {}\n", question.kind.label()));
+    match question.kind {
+        // 引き出し: 開いた質問。推奨を貼らない (押し付けない)。
+        QuestionKind::Elicit => {
+            out.push_str(&format!("聞くこと: {}\n", question.item));
+            if !question.reason.trim().is_empty() {
+                out.push_str(&format!("なぜ: {}\n", question.reason));
+            }
+            out.push_str("次: 回答待ち\n");
+        }
+        // 確認: owox が決めた行動軸を提示。人間は否認 / 修正だけ。
+        QuestionKind::Confirm => {
+            let decided = question.decided.as_deref().unwrap_or(&question.item);
+            out.push_str(&format!("決めたこと: {decided}\n"));
+            if !question.reason.trim().is_empty() {
+                out.push_str(&format!("根拠: {}\n", question.reason));
+            }
+            out.push_str("次: 違えば修正を、よければ承認を\n");
+        }
+        // 判断: 人間しか決められない意図 / 安全の分岐。推奨+理由+選択肢。
+        QuestionKind::Judge => {
+            out.push_str(&format!("決めること: {}\n", question.item));
+            if let Some(rec) = &question.recommendation {
+                out.push_str(&format!("推奨: {rec}\n"));
+            }
+            if !question.reason.trim().is_empty() {
+                out.push_str(&format!("理由: {}\n", question.reason));
+            }
+            if !question.options.is_empty() {
+                out.push_str("選択肢:\n");
+                for option in &question.options {
+                    out.push_str(&format!("- {option}\n"));
+                }
+            }
+            out.push_str("次: 回答待ち\n");
+        }
     }
-    out.push_str("Next: waiting for one answer\n");
+    // 行動軸: owox が今すぐやることを断定で出す (打診しない・即興しない)。
+    out.push_str("\n## Action (owox proceeds)\n\n");
+    for action in kickoff_owox_actions(question) {
+        out.push_str(&format!("- {action}\n"));
+    }
     out
+}
+
+/// kickoff の質問種別ごとに owox が今すぐやる行動 (行動軸・断定形)。
+fn kickoff_owox_actions(question: &KickoffQuestion) -> Vec<&'static str> {
+    match question.kind {
+        QuestionKind::Confirm => vec![
+            "Proceed with this action-axis decision; the human only overrides it. owox writes action-axis artifacts (profile / indexes / setup) without a gate.",
+        ],
+        QuestionKind::Elicit => vec![
+            "Wait for the human's intent; owox does not decide it. Meanwhile gather material with context so the next question is sharp.",
+        ],
+        QuestionKind::Judge => vec![
+            "Wait for the human's choice; this is product intent or safety, so owox does not decide it. Prepare the chosen path to apply on approval.",
+        ],
+    }
 }
 
 fn kickoff_question_json(question: &KickoffQuestion) -> serde_json::Value {
     serde_json::json!({
         "stage": question.stage,
+        "kind": question.kind.key(),
         "item": question.item,
+        "decided": question.decided,
         "recommendation": question.recommendation,
         "reason": question.reason,
-        "decider": question.decider,
         "options": question.options,
+        "owox_actions": kickoff_owox_actions(question),
     })
 }
 
@@ -5016,6 +5173,11 @@ fn render_next(
         );
         return out;
     }
+    // next は 2 区画で返す: 人間が握る製品意図の gate (open decisions / requirements to prioritize) と、
+    // owox が断定する行動軸の手 (末尾 Action) (`docs/decisions/20260627-判断2軸と対話kickoff.md`)。
+    out.push_str(
+        "The sections below split into the human's intent gate (you decide) and owox's action (owox proceeds, shown last).\n\n",
+    );
     // 自動承認が有効な時は最初に知らせる。同意源で文言を分ける (profile 由来は永続・session 由来は session 限り)。
     if auto.profile {
         out.push_str("## Automatic approval is on\n\n");
@@ -5065,7 +5227,7 @@ fn render_next(
     }
     if !ready.is_empty() {
         out.push_str("## Ready tasks\n\n");
-        for t in ready {
+        for t in &ready {
             // 段階化: stage を添える (delivery=phased の時だけ)。
             match (axes.phased_active(), &t.stage) {
                 (true, Some(s)) => {
@@ -5102,7 +5264,7 @@ fn render_next(
     }
     if !untraced.is_empty() {
         out.push_str("## Requirements needing a verification trace\n\n");
-        for r in untraced {
+        for r in &untraced {
             let detail = if r.criteria.is_empty() {
                 "no acceptance criteria yet".to_string()
             } else {
@@ -5127,6 +5289,34 @@ fn render_next(
     }
     if !routines.is_empty() {
         out.push_str(&render_routines(routines));
+    }
+    // 行動軸: owox が今すぐやることを断定で示す (打診しない・即興しない)。
+    // 製品意図 gate (open decisions / prioritization) は人間が握るのでここには含めない。
+    let mut owox_actions: Vec<&str> = Vec::new();
+    if !ready.is_empty() {
+        owox_actions
+            .push("Pick up a ready task above and implement it; owox does not ask which to start.");
+    }
+    if !untraced.is_empty() {
+        owox_actions.push(
+            "Add the missing verification traces above; owox writes these without a gate.",
+        );
+    }
+    if !decay.is_empty()
+        || !gardening.is_empty()
+        || !glossary_suggestions.is_empty()
+        || !routines.is_empty()
+    {
+        owox_actions.push(
+            "Tend the gardening / decay / glossary / routine items above; owox maintains these action-axis artifacts without a gate.",
+        );
+    }
+    if !owox_actions.is_empty() {
+        out.push_str("## Action (owox proceeds)\n\n");
+        for action in owox_actions {
+            out.push_str(&format!("- {action}\n"));
+        }
+        out.push('\n');
     }
     out
 }
@@ -5589,7 +5779,7 @@ mod tests {
         std::fs::write(repo.join("domain/core.rs"), "pub fn core() {}\n").unwrap();
         std::fs::write(repo.join("infra/db.rs"), "pub fn db() {}\n").unwrap();
 
-        let out = render_kickoff_context(&repo, &owox, &owox_core::Canon::default(), &[], &[]);
+        let out = render_kickoff_context(&repo, &owox, &owox_core::Canon::default(), &[], &[], &[]);
         assert!(out.contains("# Kickoff context"));
         assert!(out.contains("project nature draft"));
         assert!(out.contains("guardrail draft"));
@@ -6138,34 +6328,76 @@ mod tests {
     }
 
     #[test]
-    fn kickoff_next_renders_one_question() {
+    fn kickoff_next_judge_shows_recommendation_and_options() {
         let questions = vec![KickoffQuestion {
             stage: "安全境界",
+            kind: QuestionKind::Judge,
             item: "初期ガードレール案を採るか決める".to_string(),
-            recommendation: "検出案を初期値として採る".to_string(),
+            decided: None,
+            recommendation: Some("検出案を初期値として採る".to_string()),
             reason: "既存コードから案が取れている".to_string(),
-            decider: "human",
             options: vec!["検出案を採る".to_string(), "手で決める".to_string()],
         }];
         let out = render_kickoff_next(&questions);
-        assert!(out.contains("Stage: 安全境界"));
-        assert!(out.contains("Recommended: 検出案を初期値として採る"));
-        assert!(out.contains("Decider: human"));
+        assert!(out.contains("種別: 判断"));
+        assert!(out.contains("推奨: 検出案を初期値として採る"));
+        assert!(out.contains("選択肢:"));
+        // 行動軸の断定区画が必ず出る。
+        assert!(out.contains("## Action (owox proceeds)"));
+    }
+
+    #[test]
+    fn kickoff_next_elicit_has_no_recommendation() {
+        let questions = vec![KickoffQuestion {
+            stage: "目的",
+            kind: QuestionKind::Elicit,
+            item: "この repo で何を達成したい?".to_string(),
+            decided: None,
+            recommendation: None,
+            reason: "製品意図がまだ正本に無い".to_string(),
+            options: Vec::new(),
+        }];
+        let out = render_kickoff_next(&questions);
+        assert!(out.contains("種別: 引き出し"));
+        assert!(out.contains("聞くこと:"));
+        // 引き出しには推奨を貼らない (押し付けない)。
+        assert!(!out.contains("推奨:"));
+        assert!(out.contains("## Action (owox proceeds)"));
+    }
+
+    #[test]
+    fn kickoff_next_confirm_shows_decided_not_recommendation() {
+        let questions = vec![KickoffQuestion {
+            stage: "作業の型",
+            kind: QuestionKind::Confirm,
+            item: "project nature を決める".to_string(),
+            decided: Some("project nature = clean-arch-app".to_string()),
+            recommendation: None,
+            reason: "package と src 構成から機械的に判定".to_string(),
+            options: Vec::new(),
+        }];
+        let out = render_kickoff_next(&questions);
+        assert!(out.contains("種別: 確認"));
+        assert!(out.contains("決めたこと: project nature = clean-arch-app"));
+        assert!(out.contains("次: 違えば修正を、よければ承認を"));
+        assert!(!out.contains("推奨:"));
     }
 
     #[test]
     fn kickoff_question_json_has_required_fields() {
         let value = kickoff_question_json(&KickoffQuestion {
             stage: "初期 task",
+            kind: QuestionKind::Confirm,
             item: "最初の task 分割".to_string(),
-            recommendation: "AI仮決定".to_string(),
+            decided: Some("owox が初手を仮決定して切る".to_string()),
+            recommendation: None,
             reason: "repo 構造から切りやすい".to_string(),
-            decider: "ai",
-            options: vec!["AI仮決定".to_string()],
+            options: Vec::new(),
         });
-        assert_eq!(value["decider"], "ai");
+        assert_eq!(value["kind"], "confirm");
         assert_eq!(value["stage"], "初期 task");
         assert!(value["options"].is_array());
+        assert!(value["owox_actions"].is_array());
     }
 
     #[test]
@@ -6180,7 +6412,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
-        let value = kickoff_status_json(&owox, &repo, &owox_core::Canon::default(), &[], &[]);
+        let value = kickoff_status_json(&owox, &repo, &owox_core::Canon::default(), &[], &[], &[]);
         assert_eq!(value["ready_to_return"], serde_json::json!(false));
         let candidates = value["canonicalization_candidates"].as_array().unwrap();
         assert!(candidates.iter().any(|c| c["route"] == "profile.set"));
@@ -6206,7 +6438,9 @@ mod tests {
         std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
         let preview = mission_preview(&owox, &repo, crate::cache::Mission::Kickoff).unwrap();
         assert!(preview.contains("What to decide next"));
-        assert!(preview.contains("Recommended:"));
+        // 製品意図がまだ無いので、先頭は目的の引き出し質問になる。
+        assert!(preview.contains("種別: 引き出し"));
+        assert!(preview.contains("## Action (owox proceeds)"));
     }
 
     #[test]

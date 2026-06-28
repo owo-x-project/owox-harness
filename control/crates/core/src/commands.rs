@@ -124,8 +124,8 @@ fn standard_commands() -> Vec<Command> {
     let defs: &[(&str, &str, &str)] = &[
         (
             "kickoff",
-            "Start kickoff and surface the next setup decision.",
-            "Call mission.start with type kickoff, then call next. If you need repo shape, call context with scope codebase. If you need change evidence, call context with scope diff. Present one unresolved setup decision with the recommended answer and reason. Do not read the canon files yourself.",
+            "Start kickoff and surface the next setup point.",
+            "Call mission.start with type kickoff, then call next. If you need repo shape, call context with scope codebase. If you need change evidence, call context with scope diff. Present the single point next returns, shaped by its kind: for an elicit question ask it open and paste no recommendation; for a confirm point state the decision owox already made and let the human only override it; for a judge point give the recommendation, the reason, and the options. Hold product intent and safety for the human; decide and write action-axis setup yourself (project nature, indexes, setup files) without asking. Do the action owox proceeds with; do not ask the human about it. Do not read the canon files yourself.",
         ),
         (
             "req",
@@ -134,8 +134,8 @@ fn standard_commands() -> Vec<Command> {
         ),
         (
             "next",
-            "See the next decision or ready work.",
-            "Call next. If you need what changed, call context with scope diff. If you need a repo map before choosing files, call context with scope codebase. Do not read the canon files yourself.",
+            "See the intent gate and the action owox proceeds with.",
+            "Call next. It splits into the human's intent gate (open decisions and prioritization the human decides) and the action owox proceeds with (shown last). Present the gate to the human; carry out the action owox proceeds with yourself without asking. If you need what changed, call context with scope diff. If you need a repo map before choosing files, call context with scope codebase. Do not read the canon files yourself.",
         ),
         (
             "status",

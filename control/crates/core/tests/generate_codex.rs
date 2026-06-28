@@ -92,7 +92,7 @@ fn floor_carries_orientation_routing_and_vision() {
     assert!(floor.contains("Do not read or edit the canon"));
     assert!(floor.contains("## Entry map"));
     assert!(floor.contains("Use kickoff to orient"));
-    assert!(floor.contains("Use next to choose work"));
+    assert!(floor.contains("Use next to see the intent gate"));
     assert!(floor.contains("rules.lookup, glossary.lookup, and practice.lookup"));
     // Vision は床に常時。
     assert!(floor.contains("## Vision"));
