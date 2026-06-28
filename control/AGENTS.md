@@ -21,7 +21,6 @@
 
 - `docs/concept/INDEX.md`: 理念、背景、理想像
 - `docs/requirements/INDEX.md`: 要件、実装計画、完了条件
-- `docs/roadmap/INDEX.md`: 完成までのフェーズ計画、現在地、各フェーズの確認
 - `docs/decisions/INDEX.md`: 採用判断、技術選定、見直し条件
 - `docs/validation/INDEX.md`: `target repo` 検証結果
 - `docs/competitive/INDEX.md`: 競合調査
