@@ -935,7 +935,7 @@ impl OwoxServer {
     /// `docs/decisions/20260613-Phase5-実機検証の是正.md`)。封筒でなく描画した本文を返す。
     #[tool(
         name = "context",
-        description = "Get the current read map instead of reading .owox/ directly."
+        description = "Get the current read map."
     )]
     async fn context(
         &self,
@@ -1384,6 +1384,7 @@ impl OwoxServer {
     ) -> Result<CallToolResult, McpError> {
         self.envelope_result(add_criterion(
             &self.owox_dir,
+            &today_utc(),
             &p.id,
             &p.given,
             &p.when,
@@ -2066,7 +2067,7 @@ impl OwoxServer {
     /// タスクの title・状態・link・依存を変える (done は task.close)。
     #[tool(
         name = "task.update",
-        description = "Update a task; title changes need a reason and done uses task.close."
+        description = "Update a task; title changes need a reason."
     )]
     async fn task_update(
         &self,
@@ -5673,6 +5674,7 @@ mod tests {
             layer: None,
             stage: None,
             kind: None,
+            changes: Vec::new(),
         }];
         let decisions = vec![owox_core::Decision {
             id: "dec-1".to_string(),
@@ -6158,6 +6160,7 @@ mod tests {
             layer: layer.map(str::to_string),
             stage: None,
             kind: None,
+            changes: Vec::new(),
         }
     }
 
@@ -6731,6 +6734,7 @@ mod tests {
             layer: None,
             stage: None,
             kind: None,
+            changes: Vec::new(),
         }
     }
 

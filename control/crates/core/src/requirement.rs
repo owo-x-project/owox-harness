@@ -145,6 +145,32 @@ impl RequirementLinks {
     }
 }
 
+/// 要件変更の種別。実際に発火する操作だけを表す
+/// (criterion の編集・削除操作は owox に存在しないため variant を持たない)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// タイトルの変更。値は変更後のタイトル。update_requirement が記録する。
+    TitleChanged { new_title: String },
+    /// 本文の変更。update_requirement が記録する。
+    StatementChanged,
+    /// 状態の変更。値は変更後の状態。update_requirement が記録する。
+    StatusChanged { new_status: RequirementStatus },
+    /// 受け入れ基準の追加。値は追加された基準の id。add_criterion が記録する
+    /// (作成後の基準追加が唯一の本物の criterion 変更操作)。
+    CriterionAdded { id: u32 },
+}
+
+/// 要件 1 件の変更履歴エントリ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequirementChange {
+    /// 変更日 (today 文字列形式)。
+    pub date: String,
+    /// 変更種別のリスト。同じ update で複数変更がある場合はまとめる。
+    pub kinds: Vec<ChangeKind>,
+    /// この変更に連動して記録された decision の ID (任意)。
+    pub decision_id: Option<String>,
+}
+
 /// 要件 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
@@ -166,6 +192,8 @@ pub struct Requirement {
     pub stage: Option<String>,
     /// 種類 (機能/非機能)。任意。性質軸と独立でどの要件にも付けられる。
     pub kind: Option<RequirementKind>,
+    /// 変更履歴 (update_requirement が記録)。
+    pub changes: Vec<RequirementChange>,
 }
 
 /// requirement.create の入力。
@@ -276,6 +304,51 @@ impl Requirement {
             out.push('\n');
         }
 
+        if !self.changes.is_empty() {
+            out.push_str("## History\n\n");
+            for change in &self.changes {
+                // 出力順: title → statement → status → criteria-added → decision。
+                let mut title_changed: Option<&str> = None;
+                let mut statement_changed = false;
+                let mut status_changed: Option<RequirementStatus> = None;
+                let mut added: Vec<u32> = Vec::new();
+                for k in &change.kinds {
+                    match k {
+                        ChangeKind::TitleChanged { new_title } => title_changed = Some(new_title),
+                        ChangeKind::StatementChanged => statement_changed = true,
+                        ChangeKind::StatusChanged { new_status } => {
+                            status_changed = Some(*new_status)
+                        }
+                        ChangeKind::CriterionAdded { id } => added.push(*id),
+                    }
+                }
+                out.push_str(&format!("- {}\n", change.date));
+                if let Some(t) = title_changed {
+                    out.push_str(&format!("  title: {t}\n"));
+                }
+                if statement_changed {
+                    out.push_str("  statement: changed\n");
+                }
+                if let Some(s) = status_changed {
+                    out.push_str(&format!("  status: {}\n", s.as_str()));
+                }
+                if !added.is_empty() {
+                    out.push_str(&format!(
+                        "  criteria-added: {}\n",
+                        added
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                if let Some(d) = &change.decision_id {
+                    out.push_str(&format!("  decision: {d}\n"));
+                }
+            }
+            out.push('\n');
+        }
+
         out
     }
 
@@ -338,6 +411,11 @@ impl Requirement {
 
         let supersedes = doc.take("Supersedes").map(|s| s.list()).unwrap_or_default();
 
+        let changes = match doc.take("History") {
+            Some(section) => parse_history(&section)?,
+            None => Vec::new(),
+        };
+
         let remaining = doc.remaining_headings();
         if !remaining.is_empty() {
             return Err(format!("未知の見出し: {}", remaining.join(", ")));
@@ -355,6 +433,7 @@ impl Requirement {
             layer,
             stage,
             kind,
+            changes,
         })
     }
 
@@ -379,6 +458,19 @@ impl Requirement {
             "layer": self.layer,
             "stage": self.stage,
             "kind": self.kind.map(RequirementKind::as_str),
+            "changes": self.changes.iter().map(|ch| {
+                let kinds: Vec<serde_json::Value> = ch.kinds.iter().map(|k| match k {
+                    ChangeKind::TitleChanged { new_title } => json!({ "kind": "title_changed", "new_title": new_title }),
+                    ChangeKind::StatementChanged => json!({ "kind": "statement_changed" }),
+                    ChangeKind::StatusChanged { new_status } => json!({ "kind": "status_changed", "new_status": new_status.as_str() }),
+                    ChangeKind::CriterionAdded { id } => json!({ "kind": "criterion_added", "id": id }),
+                }).collect();
+                json!({
+                    "date": ch.date,
+                    "kinds": kinds,
+                    "decision_id": ch.decision_id,
+                })
+            }).collect::<Vec<_>>(),
         })
     }
 
@@ -501,6 +593,48 @@ fn parse_criteria(section: &crate::markdown::Section) -> Result<Vec<AcceptanceCr
     Ok(out)
 }
 
+/// History 節を読む。
+///
+/// `- <date>` がエントリ、その下の `title:` / `statement:` / `status:` /
+/// `criteria-added:` / `decision:` 行が属性。
+fn parse_history(section: &crate::markdown::Section) -> Result<Vec<RequirementChange>, String> {
+    let mut out: Vec<RequirementChange> = Vec::new();
+    for line in section.lines() {
+        let trimmed = line.trim();
+        if let Some(date) = trimmed.strip_prefix("- ") {
+            out.push(RequirementChange {
+                date: date.trim().to_string(),
+                kinds: Vec::new(),
+                decision_id: None,
+            });
+            continue;
+        }
+        // 属性行はインデントを剥いて key: value で読む。
+        let (key, value) = split_pair(trimmed);
+        let entry = out
+            .last_mut()
+            .ok_or("History の属性は日付の箇条書きの後に書く")?;
+        match key.as_str() {
+            "title" => entry.kinds.push(ChangeKind::TitleChanged { new_title: value }),
+            "statement" => entry.kinds.push(ChangeKind::StatementChanged),
+            "status" => entry.kinds.push(ChangeKind::StatusChanged {
+                new_status: RequirementStatus::parse(&value)?,
+            }),
+            "criteria-added" => {
+                for id_str in value.split(',') {
+                    let id: u32 = id_str.trim().parse().map_err(|_| {
+                        format!("History criteria-added の id は番号: {id_str}")
+                    })?;
+                    entry.kinds.push(ChangeKind::CriterionAdded { id });
+                }
+            }
+            "decision" => entry.decision_id = Some(value),
+            other => return Err(format!("History の未知のキー: {other}")),
+        }
+    }
+    Ok(out)
+}
+
 /// `.owox/requirements/`。
 fn requirements_dir(owox_dir: &Path) -> PathBuf {
     owox_dir.join("requirements")
@@ -614,6 +748,11 @@ pub fn create_requirement(
         return Envelope::failed("title が空");
     }
     for c in &input.criteria {
+        if c.given.trim().is_empty() || c.when.trim().is_empty() || c.then.trim().is_empty() {
+            return Envelope::failed(
+                "An acceptance criterion needs non-empty given, when, and then.",
+            );
+        }
         if let Some(v) = &c.verify
             && let Err(err) = check_known(v, known_checks)
         {
@@ -658,6 +797,7 @@ pub fn create_requirement(
         layer: input.layer.filter(|s| !s.trim().is_empty()),
         stage: input.stage.filter(|s| !s.trim().is_empty()),
         kind: input.kind,
+        changes: Vec::new(),
     };
 
     if let Err(err) = save_requirement(owox_dir, &requirement) {
@@ -756,6 +896,12 @@ pub fn update_requirement(
         Err(err) => return Envelope::failed(err),
     };
 
+    // 変更前のスナップショット (history 生成用)。criteria は update では変化しない
+    // (編集・削除操作が無い) ため title/statement/status のみ追う。
+    let before_title = requirement.title.clone();
+    let before_statement = requirement.statement.clone();
+    let before_status = requirement.status;
+
     if let Some(l) = &input.layer
         && let Err(err) = crate::quality::check_known_layer(l, known_layers)
     {
@@ -849,6 +995,34 @@ pub fn update_requirement(
         requirement.kind = k;
     }
 
+    // 変更履歴の生成。軽量変更 (priority/layer/stage/kind) は残さない。
+    {
+        let mut kinds: Vec<ChangeKind> = Vec::new();
+        if requirement.title != before_title {
+            kinds.push(ChangeKind::TitleChanged {
+                new_title: requirement.title.clone(),
+            });
+        }
+        if requirement.statement.trim() != before_statement.trim() {
+            kinds.push(ChangeKind::StatementChanged);
+        }
+        if requirement.status != before_status {
+            kinds.push(ChangeKind::StatusChanged {
+                new_status: requirement.status,
+            });
+        }
+
+        if !kinds.is_empty() {
+            // この update で記録した decision のみ結ぶ (title/statement 変更時に1件作られる。
+            // status 変更は軽量で来歴連動しないため過去の decision を誤って結ばない)。
+            requirement.changes.push(RequirementChange {
+                date: today.to_string(),
+                kinds,
+                decision_id: decision_ids.first().cloned(),
+            });
+        }
+    }
+
     if let Err(err) = save_requirement(owox_dir, &requirement) {
         return Envelope::failed(err);
     }
@@ -856,13 +1030,24 @@ pub fn update_requirement(
 }
 
 /// requirement.add_criterion。受け入れ基準を 1 件足す。次の番号を採番する。
-pub fn add_criterion(owox_dir: &Path, id: &str, given: &str, when: &str, then: &str) -> Envelope {
+///
+/// 作成後の基準追加が唯一の本物の criterion 変更操作なので、ここで履歴へ CriterionAdded を残す。
+pub fn add_criterion(
+    owox_dir: &Path,
+    today: &str,
+    id: &str,
+    given: &str,
+    when: &str,
+    then: &str,
+) -> Envelope {
     let mut requirement = match load_requirement(owox_dir, id) {
         Ok(r) => r,
         Err(err) => return Envelope::failed(err),
     };
-    if given.trim().is_empty() && when.trim().is_empty() && then.trim().is_empty() {
-        return Envelope::failed("受け入れ基準は given / when / then のいずれかが必要");
+    if given.trim().is_empty() || when.trim().is_empty() || then.trim().is_empty() {
+        return Envelope::failed(
+            "An acceptance criterion needs non-empty given, when, and then.",
+        );
     }
 
     let next = requirement.criteria.iter().map(|c| c.id).max().unwrap_or(0) + 1;
@@ -873,6 +1058,11 @@ pub fn add_criterion(owox_dir: &Path, id: &str, given: &str, when: &str, then: &
         when: when.trim().to_string(),
         then: then.trim().to_string(),
         verify: None,
+    });
+    requirement.changes.push(RequirementChange {
+        date: today.to_string(),
+        kinds: vec![ChangeKind::CriterionAdded { id: next }],
+        decision_id: None,
     });
     if let Err(err) = save_requirement(owox_dir, &requirement) {
         return Envelope::failed(err);
@@ -1250,10 +1440,10 @@ mod tests {
     fn add_criterion_allocates_next_number() {
         let dir = tempdir();
         let id = create(&dir, "x");
-        let env = add_criterion(&dir, &id, "g", "w", "t");
+        let env = add_criterion(&dir, "20260628", &id, "g", "w", "t");
         assert_eq!(env.status, Status::Ok);
         assert_eq!(env.data.unwrap()["criterion"], 1);
-        let env = add_criterion(&dir, &id, "g2", "w2", "t2");
+        let env = add_criterion(&dir, "20260628", &id, "g2", "w2", "t2");
         assert_eq!(env.data.unwrap()["criterion"], 2);
         let req = load_requirement(&dir, &id).unwrap();
         assert_eq!(req.criteria.len(), 2);
@@ -1263,7 +1453,7 @@ mod tests {
     fn link_verification_sets_verify_on_criterion() {
         let dir = tempdir();
         let id = create(&dir, "x");
-        add_criterion(&dir, &id, "g", "w", "t");
+        add_criterion(&dir, "20260628", &id, "g", "w", "t");
         let k = known(&["test_x"]);
         // 存在しない基準は失敗。
         assert_eq!(
@@ -1281,7 +1471,7 @@ mod tests {
     fn link_verification_rejects_unknown_check() {
         let dir = tempdir();
         let id = create(&dir, "x");
-        add_criterion(&dir, &id, "g", "w", "t");
+        add_criterion(&dir, "20260628", &id, "g", "w", "t");
         // 既知でない検査名への link は弾く (dangling を作らせない)。
         let env = link_verification(&dir, &known(&["real_check"]), &id, 1, "ghost_check");
         assert_eq!(env.status, Status::Failed);
@@ -1446,6 +1636,7 @@ mod tests {
             layer: None,
             stage: None,
             kind: None,
+            changes: Vec::new(),
         }
     }
 
@@ -1523,5 +1714,175 @@ mod tests {
         .unwrap();
         let err = list_requirements(&dir).unwrap_err();
         assert!(err.contains("未知の見出し"), "{err}");
+    }
+
+    // ── 機能C-1 テスト ──
+
+    #[test]
+    fn create_rejects_empty_given() {
+        let dir = tempdir();
+        let env = create_requirement(
+            &dir,
+            "20260628",
+            &[],
+            &[],
+            CreateRequirementInput {
+                title: "x".to_string(),
+                criteria: vec![CriterionInput {
+                    given: "  ".to_string(),
+                    when: "w".to_string(),
+                    then: "t".to_string(),
+                    verify: None,
+                }],
+                ..CreateRequirementInput::default()
+            },
+        );
+        assert_eq!(env.status, Status::Failed);
+        assert!(env.reason.contains("non-empty"), "{}", env.reason);
+    }
+
+    #[test]
+    fn add_criterion_rejects_empty_field() {
+        let dir = tempdir();
+        let id = create(&dir, "x");
+        // when が空の場合は弾く。
+        let env = add_criterion(&dir, "20260628", &id, "g", "", "t");
+        assert_eq!(env.status, Status::Failed);
+        assert!(env.reason.contains("non-empty"), "{}", env.reason);
+    }
+
+    // ── 機能D テスト ──
+
+    #[test]
+    fn history_roundtrip_through_markdown() {
+        let dir = tempdir();
+        let id = create(&dir, "x");
+        // title 変更で履歴が記録される。
+        update_requirement(
+            &dir,
+            "20260628",
+            &id,
+            &[],
+            UpdateRequirementInput {
+                title: Some("new title".to_string()),
+                reason: Some("scope changed".to_string()),
+                ..UpdateRequirementInput::default()
+            },
+        );
+        let req = load_requirement(&dir, &id).unwrap();
+        assert_eq!(req.changes.len(), 1);
+        assert_eq!(req.changes[0].date, "20260628");
+        assert!(req.changes[0].kinds.iter().any(|k| matches!(k, ChangeKind::TitleChanged { .. })));
+        // もう一度読み直して round-trip を確認。
+        let text = std::fs::read_to_string(requirement_path(&dir, &id)).unwrap();
+        let req2 = Requirement::parse(&id, &text).unwrap();
+        assert_eq!(req.changes, req2.changes);
+    }
+
+    #[test]
+    fn history_records_criterion_added_on_add_criterion() {
+        let dir = tempdir();
+        let id = create(&dir, "y");
+        // 基準追加は唯一の本物の criterion 変更操作で、add_criterion が履歴へ残す。
+        add_criterion(&dir, "20260628", &id, "g", "w", "t");
+        add_criterion(&dir, "20260629", &id, "g2", "w2", "t2");
+        let req = load_requirement(&dir, &id).unwrap();
+        assert_eq!(req.changes.len(), 2);
+        assert_eq!(
+            req.changes[0].kinds,
+            vec![ChangeKind::CriterionAdded { id: 1 }]
+        );
+        assert_eq!(
+            req.changes[1].kinds,
+            vec![ChangeKind::CriterionAdded { id: 2 }]
+        );
+        // round-trip (criteria-added 行が読み戻せる)。
+        let text = std::fs::read_to_string(requirement_path(&dir, &id)).unwrap();
+        let req2 = Requirement::parse(&id, &text).unwrap();
+        assert_eq!(req.changes, req2.changes);
+    }
+
+    #[test]
+    fn history_records_status_change() {
+        let dir = tempdir();
+        let id = create(&dir, "y");
+        // status 変更 (draft → accepted) は履歴へ残る (来歴連動はしない軽量変更)。
+        let env = update_requirement(
+            &dir,
+            "20260628",
+            &id,
+            &[],
+            UpdateRequirementInput {
+                status: Some("accepted".to_string()),
+                ..UpdateRequirementInput::default()
+            },
+        );
+        assert_eq!(env.status, Status::Ok);
+        assert!(env.decision_ids.is_empty());
+        let req = load_requirement(&dir, &id).unwrap();
+        assert_eq!(req.changes.len(), 1);
+        assert_eq!(
+            req.changes[0].kinds,
+            vec![ChangeKind::StatusChanged {
+                new_status: RequirementStatus::Accepted
+            }]
+        );
+        // status 変更は来歴連動しないので decision_id は無い。
+        assert!(req.changes[0].decision_id.is_none());
+        // round-trip。
+        let text = std::fs::read_to_string(requirement_path(&dir, &id)).unwrap();
+        let req2 = Requirement::parse(&id, &text).unwrap();
+        assert_eq!(req.changes, req2.changes);
+    }
+
+    #[test]
+    fn title_change_links_decision_in_history() {
+        let dir = tempdir();
+        let id = create(&dir, "y");
+        let env = update_requirement(
+            &dir,
+            "20260628",
+            &id,
+            &[],
+            UpdateRequirementInput {
+                title: Some("y updated".to_string()),
+                statement: Some("new body".to_string()),
+                reason: Some("r".to_string()),
+                ..UpdateRequirementInput::default()
+            },
+        );
+        assert_eq!(env.status, Status::Ok);
+        let req = load_requirement(&dir, &id).unwrap();
+        assert_eq!(req.changes.len(), 1);
+        let kinds = &req.changes[0].kinds;
+        assert!(kinds.iter().any(|k| matches!(k, ChangeKind::TitleChanged { .. })));
+        assert!(kinds.iter().any(|k| matches!(k, ChangeKind::StatementChanged)));
+        // title/statement 変更はこの update で作られた decision を結ぶ。
+        assert_eq!(req.changes[0].decision_id, env.decision_ids.first().cloned());
+        assert!(req.changes[0].decision_id.is_some());
+    }
+
+    #[test]
+    fn history_in_to_json() {
+        let dir = tempdir();
+        let id = create(&dir, "z");
+        update_requirement(
+            &dir,
+            "20260628",
+            &id,
+            &[],
+            UpdateRequirementInput {
+                title: Some("z2".to_string()),
+                reason: Some("r".to_string()),
+                ..UpdateRequirementInput::default()
+            },
+        );
+        let got = get_requirement(&dir, &id);
+        let data = got.data.unwrap();
+        let changes = data["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["date"], "20260628");
+        let kinds = changes[0]["kinds"].as_array().unwrap();
+        assert!(kinds.iter().any(|k| k["kind"] == "title_changed"));
     }
 }

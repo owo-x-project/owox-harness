@@ -2,7 +2,14 @@
 
 ## 状態
 
-草案。次回以降に詳細を詰める。
+検出ロジック実装済み。登録・提案面は未着手。
+
+- `crates/core/src/routine.rs` に RoutineKind::ScriptSkill / Confidence (High/Medium/Low) /
+  is_script_skill_candidate / compute_confidence が実装済み
+- 必須条件チェック・除外条件・強い判定条件・信頼度計算はコードで実現済み
+- `verify.run` の `data.routine_suggestions` と `next` への露出も実装済み
+  (`crates/mcp/src/serve.rs` 1068 / 1654 / 1689行目)
+- ギャップ: usage ログへの安全分類語彙・warning の出力先は未確認 (次回確認)
 
 ## 背景
 

@@ -247,12 +247,26 @@ pub fn run_verify(
         .iter()
         .map(|f| json!({ "kind": f.kind, "subject": f.subject, "detail": f.detail }))
         .collect();
+    // accepted なのに基準0の要件を advisory 警告として収集する (block しない)。
+    // draft は整形中で許容、superseded は対象外。
+    let warnings: Vec<_> = requirements
+        .iter()
+        .filter(|r| r.status == RequirementStatus::Accepted && r.criteria.is_empty())
+        .map(|r| {
+            json!({
+                "kind": "no_acceptance_criteria",
+                "requirement": r.id,
+                "detail": format!("Requirement {} has no acceptance criteria.", r.id),
+            })
+        })
+        .collect();
     let data = json!({
         "results": results,
         "completion": completion,
         "requirements": req_details,
         "quality": quality,
         "decay": decay,
+        "warnings": warnings,
     });
 
     // 封筒 status: 検査失敗のみ failed (要件 failed は link 先検査の失敗を含むのでここに吸収)。
@@ -408,6 +422,7 @@ mod tests {
             layer: None,
             stage: None,
             kind: None,
+            changes: Vec::new(),
         }
     }
 
@@ -431,6 +446,55 @@ mod tests {
         assert_eq!(data["completion"]["verification"], "passed");
         assert_eq!(data["completion"]["requirement"], "needs_human");
         assert_eq!(data["requirements"][0]["unlinked"], 1);
+    }
+
+    // ── 機能C-2 テスト ──
+
+    fn req_no_criteria(id: &str, status: RequirementStatus) -> Requirement {
+        Requirement {
+            id: id.to_string(),
+            title: "no criteria".to_string(),
+            status,
+            statement: String::new(),
+            criteria: Vec::new(),
+            links: crate::requirement::RequirementLinks::default(),
+            supersedes: Vec::new(),
+            priority: None,
+            layer: None,
+            stage: None,
+            kind: None,
+            changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn accepted_requirement_with_no_criteria_appears_in_warnings() {
+        // accepted で基準0の要件は warnings に出る (block しない)。
+        let req = req_no_criteria("20260628-no-criteria", RequirementStatus::Accepted);
+        let env = run_verify(&cfg(&["true"]), &[req], &[], &[], Path::new("."));
+        // block でないので status は needs_human (失敗しない)。
+        assert_ne!(env.status, Status::Failed);
+        let data = env.data.unwrap();
+        let warnings = data["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["kind"], "no_acceptance_criteria");
+        assert!(
+            warnings[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("20260628-no-criteria"),
+            "{}",
+            warnings[0]["detail"]
+        );
+    }
+
+    #[test]
+    fn draft_requirement_with_no_criteria_is_not_warned() {
+        // draft は整形中なので基準0でも警告しない (雑音を避ける)。
+        let req = req_no_criteria("20260628-draft", RequirementStatus::Draft);
+        let env = run_verify(&cfg(&["true"]), &[req], &[], &[], Path::new("."));
+        let data = env.data.unwrap();
+        assert!(data["warnings"].as_array().unwrap().is_empty());
     }
 
     // ── check_phase_rules テスト ──

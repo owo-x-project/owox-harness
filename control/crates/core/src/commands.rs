@@ -135,7 +135,7 @@ fn standard_commands() -> Vec<Command> {
             name: "kickoff".to_string(),
             description: "Start kickoff and surface the next setup point.".to_string(),
             body: format!(
-                "Call mission.start with type kickoff, then call next. {GRILL_GUIDANCE} Hold product intent and safety for the human; decide and write action-axis setup yourself (project nature, indexes, setup files) without asking. Do the action owox proceeds with; do not ask the human about it. Do not read the canon files yourself."
+                "Call kickoff, then call next. {GRILL_GUIDANCE} Hold product intent and safety for the human; decide and write action-axis setup yourself (project nature, indexes, setup files) without asking. Do the action owox proceeds with; do not ask the human about it. Do not read the canon files yourself."
             ),
         },
         Command {

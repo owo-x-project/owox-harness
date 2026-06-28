@@ -2,7 +2,13 @@
 
 ## 状態
 
-草案。次回以降に詳細を詰める。
+骨格実装済み。残論点を決着。
+
+- 入口 skill 13個・`context scope="diff"/"codebase"`・routine→script-skill 検出は実装済み
+  (`crates/core/src/commands.rs`・`crates/mcp/src/serve.rs`・`crates/core/src/routine.rs`)
+- カテゴリ露出と mode 統合は `docs/decisions/20260628-tool整理仕上げと仕様管理取り込み.md` で決着
+  (カテゴリは設計上の整理概念に留め露出しない・mode 統合は tools/list 起動時負荷が再問題化するまで見送り)
+- 未決事項のうち「自動承認系 tool の整理方法」「profile / knowledge / branch の mode 統合時期」は同 decision の見直し条件へ移行
 
 ## 背景
 
