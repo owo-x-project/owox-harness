@@ -38,11 +38,11 @@ pub fn run(args: &[String]) -> ExitCode {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let owox_dir = base.join(".owox");
-    if !owox_dir.exists() {
-        if let Err(err) = bootstrap_canon(&base, &owox_dir) {
-            eprintln!("owox setup: {err}");
-            return ExitCode::FAILURE;
-        }
+    if !owox_dir.exists()
+        && let Err(err) = bootstrap_canon(&base, &owox_dir)
+    {
+        eprintln!("owox setup: {err}");
+        return ExitCode::FAILURE;
     }
     let canon = match owox_core::load_canon(&owox_dir) {
         Ok(canon) => canon,

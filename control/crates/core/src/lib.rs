@@ -8,10 +8,12 @@ pub mod canon;
 pub mod canon_detect;
 pub mod commands;
 pub mod decay;
+pub mod delivery;
 pub mod envelope;
 pub mod experience;
 pub mod gate;
 pub mod glossary;
+pub mod glossary_suggestions;
 pub mod hook;
 pub mod irreversible;
 pub mod knowledge;
@@ -50,18 +52,27 @@ pub use canon_detect::{
 };
 pub use commands::{Command, command_skills, load_commands};
 pub use decay::{
-    DecayFinding, run_branch_memory_decay, run_code_decay, run_decay, run_knowledge_decay,
-    run_practice_decay, run_practice_redundancy,
+    DecayFinding, detect_stale_verify_links, run_branch_memory_decay, run_code_decay, run_decay,
+    run_knowledge_decay, run_practice_decay, run_practice_redundancy, run_rules_redundancy,
+};
+pub use delivery::{
+    DeliveryOperation, DeliveryRequest, DeliverySelection, is_dependency_path,
+    render_delivery_block, select_delivery, select_delivery_for_phase,
 };
 pub use envelope::{Envelope, Gate, Status};
 pub use experience::{export as experience_export, import as experience_import};
 pub use gate::{Enforcement, autonomy_enforcement, commit_blocks, compose, phase_enforcement};
 pub use glossary::lookup as glossary_lookup;
+pub use glossary_suggestions::{
+    GlossaryScanText, GlossarySuggestion, GlossaryTermHit, extract_term_hits, suggest_terms,
+    suggest_terms_from_hits,
+};
 pub use hook::{
-    GateAuthorization, GlossaryInjection, HookDecision, LayerGate, PolicyInjection, StopDecision,
-    VerifyOutcome, commit_gate, floor_context, glossary_injection, is_git_commit,
-    layer_pre_action_gate, parse_patch_changes, policy_injection, pre_tool_use_decision,
-    render_rules_block, render_skills_section, stop_decision,
+    GateAuthorization, GlossaryInjection, HookDecision, LayerGate, PatchChange, PatchOp,
+    PolicyInjection, StopDecision, VerifyOutcome, commit_gate, entry_map_tools, floor_context,
+    glossary_injection, is_git_commit, layer_pre_action_gate, parse_patch_changes,
+    policy_injection, pre_tool_use_decision, render_rules_block, render_rules_block_for_phase,
+    stop_decision, write_targets,
 };
 pub use knowledge::{
     Knowledge, KnowledgeInput, KnowledgeStatus, add_knowledge, get_knowledge, list_knowledge,
@@ -70,8 +81,8 @@ pub use knowledge::{
 pub use load::{LoadError, load_canon};
 pub use model::{
     Brand, Canon, Context, ContextEntry, ContextLimits, ForbiddenTerm, Glossary, GlossaryEntry,
-    HumanGate, Irreversible, ModelTier, Phase, Practice, Practices, Rules, ScopeKind, Settings,
-    State, TargetSpec, Targets, VerifyCheck, VerifyConfig,
+    HumanGate, Irreversible, ModelTier, Phase, Practice, PracticeEntry, Practices, RuleEntry,
+    Rules, ScopeKind, Settings, State, TargetSpec, Targets, VerifyCheck, VerifyConfig,
 };
 pub use practices::lookup as practice_lookup;
 pub use profile::{
@@ -83,10 +94,11 @@ pub use quality::{
     run_brand, run_quality,
 };
 pub use record::{
-    Decision, DecisionLinks, DecisionStatus, ProposedChange, RecordInput, approve_gate,
-    approve_gate_auto, confirm_auto_approval, gate_autonomy, list_auto_pending, list_decisions,
-    list_gates, load_decision, mark_gate_consumed, record_decision,
-    record_decision_with_authorization, record_decision_with_change, reject_decision,
+    Decision, DecisionKind, DecisionLinks, DecisionStatus, ProposedChange, RecordInput,
+    approve_gate, approve_gate_auto, confirm_auto_approval, gate_autonomy, get_decision,
+    list_auto_pending, list_decisions, list_gates, load_decision, mark_gate_consumed,
+    record_decision, record_decision_with_authorization, record_decision_with_change,
+    record_decision_with_kind, reject_decision,
 };
 pub use release::{Release, VersionSource};
 pub use requirement::{
@@ -95,17 +107,22 @@ pub use requirement::{
     get_requirement, layer_progress, link_verification, list_requirements,
     list_requirements_envelope, update_requirement,
 };
-pub use review::{Applicability, Lens, load_lenses, review_lenses_envelope, select_lenses};
-pub use routine::{RoutineSuggestion, run_routine_suggestions};
+pub use review::{
+    Applicability, CANON_EMPHASIS_IDS, Lens, apply_canon_emphasis, load_lenses,
+    review_lenses_envelope, select_lenses,
+};
+pub use routine::{Confidence, RoutineKind, RoutineSuggestion, run_routine_suggestions};
 pub use skill::{
     ScriptFile, Skill, SkillStatus, Stage, TestState, list_skills_envelope, load_skills,
     promote_skill, register_skill, registered_skills, remember, run_skill_tests, skill_status,
 };
 pub use state::set_state;
-pub use target::{GeneratedFile, Target, Write, WriteError, find, registry, write_all};
+pub use target::{
+    GeneratedFile, Target, Write, WriteError, find, registry, render_generated_file, write_all,
+};
 pub use task::{
     CreateTaskInput, Dep, DepKind, ExternalRef, Task, TaskLinks, TaskStatus, UpdateTaskInput,
     add_note, close_task, create_task, drop_task, is_ready, link_task, list_tasks,
     list_tasks_envelope, update_task,
 };
-pub use verify::{CheckResult, run_checks, run_verify};
+pub use verify::{CheckResult, check_phase_rules, run_checks, run_verify};

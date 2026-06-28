@@ -25,3 +25,4 @@ rmcp = { version = "1", features = ["server", "transport-io"] }
 schemars = "1"
 # rmcp は非同期 (tokio) 前提。serve だけ runtime を起こす (generate/hook は同期のまま)。
 tokio = { version = "1", features = ["rt", "macros", "io-std", "time"] }
+libc = "0.2"

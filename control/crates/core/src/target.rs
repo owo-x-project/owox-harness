@@ -38,17 +38,40 @@ pub enum Write {
     MergeJson,
 }
 
+/// skill 本文の質問提示プレースホルダ。生成時に各 CLI の質問ツール文言へ写像する。
+/// CLI 非依存の正本 (commands.rs) はこの token を埋め込み、target 生成で具体化する。
+pub const QUESTION_TOOL_PLACEHOLDER: &str = "{{QUESTION_TOOL}}";
+
+/// 質問提示プレースホルダを CLI の質問ツール文言へ写像する。
+///
+/// `question_tool` が Some(名前) なら「using the <名前> tool」、None なら平文へ倒す
+/// (その CLI に構造化質問ツールが無い)。token が無い skill 本文はそのまま返る。
+pub fn apply_question_tool(skill_md: &str, question_tool: Option<&str>) -> String {
+    let phrasing = match question_tool {
+        Some(tool) => format!("using the {tool} tool"),
+        None => {
+            "by asking in plain text (this client has no interactive question tool)".to_string()
+        }
+    };
+    skill_md.replace(QUESTION_TOOL_PLACEHOLDER, &phrasing)
+}
+
 /// AI CLI ごとの生成方法。
 pub trait Target {
     /// 対象 CLI の識別子。
     fn name(&self) -> &str;
+    /// 対話的質問ツールの名前 (人間へ質問を提示する構造化ツール)。無ければ None (平文で聞く)。
+    /// 質問提示プレースホルダ ([`QUESTION_TOOL_PLACEHOLDER`]) の写像に使う。
+    fn question_tool(&self) -> Option<&'static str> {
+        None
+    }
     /// 正本から生成物を出す (hook 登録 / 設定 / skills。ルート指示ファイルは廃止し床は hook 注入)。
     fn generate(&self, canon: &Canon) -> Vec<GeneratedFile>;
     /// 登録済みスキルを CLI が読む配置へ出す。
     ///
-    /// SKILL.md 本体は横断標準なので skill が持つ文面を verbatim で出し、
-    /// 出力先と CLI 固有ファイル (自動起動可否のメタ等) だけ各 Target が決める。
-    /// テスト合格で絞った集合を呼び出し側が渡す (テスト実行=副作用は生成と分ける)。
+    /// SKILL.md 本体は横断標準なので skill が持つ文面を verbatim で出し (質問提示プレースホルダは
+    /// この CLI の質問ツール文言へ写像する)、出力先と CLI 固有ファイル (自動起動可否のメタ等) だけ
+    /// 各 Target が決める。テスト合格で絞った集合を呼び出し側が渡す (テスト実行=副作用は生成と分ける)。
     fn generate_skills(&self, skills: &[Skill]) -> Vec<GeneratedFile>;
 }
 
@@ -94,23 +117,10 @@ pub fn write_all(base: &Path, files: &[GeneratedFile]) -> Result<(), WriteError>
             })?;
         }
 
-        let contents = match file.write {
-            Write::Overwrite => file.contents.clone(),
-            Write::MergeToml => {
-                let existing = std::fs::read_to_string(&dest).unwrap_or_default();
-                merge_toml(&existing, &file.contents).map_err(|message| WriteError {
-                    path: dest.clone(),
-                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
-                })?
-            }
-            Write::MergeJson => {
-                let existing = std::fs::read_to_string(&dest).unwrap_or_default();
-                merge_json(&existing, &file.contents).map_err(|message| WriteError {
-                    path: dest.clone(),
-                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
-                })?
-            }
-        };
+        let contents = render_generated_file(&dest, file).map_err(|message| WriteError {
+            path: dest.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+        })?;
 
         std::fs::write(&dest, &contents).map_err(|source| WriteError {
             path: dest.clone(),
@@ -121,6 +131,21 @@ pub fn write_all(base: &Path, files: &[GeneratedFile]) -> Result<(), WriteError>
         }
     }
     Ok(())
+}
+
+/// 既存ファイルに対して generated file を適用したらどうなるかを返す。書き込みはしない。
+pub fn render_generated_file(dest: &Path, file: &GeneratedFile) -> Result<String, String> {
+    match file.write {
+        Write::Overwrite => Ok(file.contents.clone()),
+        Write::MergeToml => {
+            let existing = std::fs::read_to_string(dest).unwrap_or_default();
+            merge_toml(&existing, &file.contents)
+        }
+        Write::MergeJson => {
+            let existing = std::fs::read_to_string(dest).unwrap_or_default();
+            merge_json(&existing, &file.contents)
+        }
+    }
 }
 
 /// 既存 TOML へ owox 管理ブロック (断片) をマージする。
@@ -215,6 +240,31 @@ fn set_executable(_path: &Path) -> Result<(), WriteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_question_tool_maps_some_to_named_tool() {
+        let md = format!("ask {QUESTION_TOOL_PLACEHOLDER} now");
+        assert_eq!(
+            apply_question_tool(&md, Some("AskUserQuestion")),
+            "ask using the AskUserQuestion tool now"
+        );
+    }
+
+    #[test]
+    fn apply_question_tool_maps_none_to_plain_text() {
+        let md = format!("ask {QUESTION_TOOL_PLACEHOLDER} now");
+        let out = apply_question_tool(&md, None);
+        assert!(out.contains("plain text"), "{out}");
+        assert!(!out.contains("tool}}"), "プレースホルダが残る: {out}");
+    }
+
+    #[test]
+    fn apply_question_tool_leaves_untokened_text_unchanged() {
+        assert_eq!(
+            apply_question_tool("no token here", Some("X")),
+            "no token here"
+        );
+    }
 
     const OWOX_BLOCK: &str = "[mcp_servers.owox]\ncommand = \"owox\"\nargs = [\"serve\"]\n";
 

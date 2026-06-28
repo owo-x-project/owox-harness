@@ -46,6 +46,14 @@ pub fn record(owox_dir: &Path, today: &str, name: &str) {
     }
 }
 
+/// シェルコマンドを安全な分類名へ畳んで記録する。
+///
+/// 生コマンドや引数は残さず、script-skill 判定に要る最小の語彙だけを残す。
+/// 未分類のものは広い `Bash` へ倒す。
+pub fn record_shell(owox_dir: &Path, today: &str, command: &str) {
+    record(owox_dir, today, &classify_shell(command));
+}
+
 /// 記録された name を順序つきで読む。読めなければ空 (検知を妨げない)。
 pub fn read_names(owox_dir: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(usage_path(owox_dir)) else {
@@ -59,6 +67,58 @@ pub fn read_names(owox_dir: &Path) -> Vec<String> {
 /// name を単一トークンへ整える (空白を `_`・前後トリム)。改行や空白で行形式が崩れないように。
 fn sanitize(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join("_")
+}
+
+/// シェルコマンドを安全な分類名へ畳む。
+///
+/// `rtk` は透過扱いにし、その後ろの本体だけを見る。
+///
+/// 保存カテゴリ (引数・パス・検索語は残さない原則は厳守):
+///
+/// - repo local・決定論寄り語彙: `Bash:rg` / `Bash:sed` / `Bash:awk` / `Bash:jq` / `Bash:yq` /
+///   `Bash:cargo-test` / `Bash:npm-test` / `Bash:pytest` / `Bash:git-diff`
+/// - 破壊的操作 (rm/delete 系): `Bash:rm`
+/// - 外部サービス操作: `Bash:curl` / `Bash:gh` / `Bash:wget`
+/// - ネットワーク/認証系: `Bash:ssh` / `Bash:scp` / `Bash:rsync`
+/// - それ以外: `Bash`
+///
+/// 破壊的/外部サービス/ネットワーク系のカテゴリは script-skill 判定で除外シグナルとなる。
+fn classify_shell(command: &str) -> String {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    if tokens.is_empty() {
+        return "Bash".to_string();
+    }
+    let body = if tokens.first() == Some(&"rtk") {
+        &tokens[1..]
+    } else {
+        &tokens[..]
+    };
+    let Some(first) = body.first() else {
+        return "Bash".to_string();
+    };
+    match *first {
+        // repo local・決定論寄り語彙。
+        "rg" => "Bash:rg".to_string(),
+        "sed" => "Bash:sed".to_string(),
+        "awk" => "Bash:awk".to_string(),
+        "jq" => "Bash:jq".to_string(),
+        "yq" => "Bash:yq".to_string(),
+        "pytest" => "Bash:pytest".to_string(),
+        "cargo" if body.get(1) == Some(&"test") => "Bash:cargo-test".to_string(),
+        "npm" if body.get(1) == Some(&"test") => "Bash:npm-test".to_string(),
+        "git" if body.get(1) == Some(&"diff") => "Bash:git-diff".to_string(),
+        // 破壊的操作 (rm / delete 系)。script-skill 除外シグナル。
+        "rm" => "Bash:rm".to_string(),
+        // 外部サービス操作。script-skill 除外シグナル (秘密値・認証も含む)。
+        "curl" => "Bash:curl".to_string(),
+        "wget" => "Bash:wget".to_string(),
+        "gh" => "Bash:gh".to_string(),
+        // ネットワーク/認証系。script-skill 除外シグナル。
+        "ssh" => "Bash:ssh".to_string(),
+        "scp" => "Bash:scp".to_string(),
+        "rsync" => "Bash:rsync".to_string(),
+        _ => "Bash".to_string(),
+    }
 }
 
 /// `.owox/.gitignore` に `usage.log` を冪等に足す。telemetry を履歴へ乗せない。
@@ -122,6 +182,15 @@ mod tests {
     }
 
     #[test]
+    fn record_shell_keeps_only_safe_vocab() {
+        let dir = tempdir();
+        record_shell(&dir, "20260626", "rtk rg -n mission crates/mcp/src");
+        record_shell(&dir, "20260626", "cargo test -q");
+        record_shell(&dir, "20260626", "git status --short");
+        assert_eq!(read_names(&dir), vec!["Bash:rg", "Bash:cargo-test", "Bash"]);
+    }
+
+    #[test]
     fn empty_name_is_skipped() {
         let dir = tempdir();
         record(&dir, "20260616", "   ");
@@ -132,5 +201,33 @@ mod tests {
     fn read_missing_is_empty() {
         let dir = tempdir();
         assert!(read_names(&dir).is_empty());
+    }
+
+    /// 破壊的/外部サービス/ネットワーク系のカテゴリが正しく分類される。
+    #[test]
+    fn destructive_and_external_categories_classified() {
+        let dir = tempdir();
+        // 破壊的操作。
+        record_shell(&dir, "20260627", "rm -rf /tmp/foo");
+        // 外部サービス操作。
+        record_shell(&dir, "20260627", "curl https://example.com");
+        record_shell(&dir, "20260627", "wget https://example.com");
+        record_shell(&dir, "20260627", "gh pr create");
+        // ネットワーク/認証系。
+        record_shell(&dir, "20260627", "ssh user@host");
+        record_shell(&dir, "20260627", "scp foo user@host:/tmp");
+        record_shell(&dir, "20260627", "rsync -av src/ dst/");
+        assert_eq!(
+            read_names(&dir),
+            vec![
+                "Bash:rm",
+                "Bash:curl",
+                "Bash:wget",
+                "Bash:gh",
+                "Bash:ssh",
+                "Bash:scp",
+                "Bash:rsync",
+            ]
+        );
     }
 }

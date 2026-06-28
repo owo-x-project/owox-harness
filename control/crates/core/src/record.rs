@@ -38,12 +38,46 @@ impl DecisionStatus {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             DecisionStatus::Open => "open",
             DecisionStatus::Adopted => "adopted",
             DecisionStatus::Rejected => "rejected",
             DecisionStatus::Superseded => "superseded",
+        }
+    }
+}
+
+/// 来歴の種類。判断を分類するタグ (層は分けず来歴機構を共用。`docs/decisions/20260628-設計判断の種別.md`)。
+///
+/// design を first-class にし、要件↔設計↔作業↔検証 のトレースで設計ノードを立てるのが主目的。
+/// 構造制約そのもの (依存方向・層境界) は quality.toml の適応度関数が機械強制する側で、ここは
+/// 「なぜこの構造か・捨てた案・見直し条件」という判断を分類する。無タグ (None) も許す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionKind {
+    /// 設計判断。構造・責務境界・依存方向・拡張性の選択。
+    Design,
+    /// 方向判断。製品の方針・スコープ・優先の選択。
+    Direction,
+    /// 方針判断。手順・規約・運用ルールの選択。
+    Policy,
+}
+
+impl DecisionKind {
+    pub fn parse(value: &str) -> Result<DecisionKind, String> {
+        match value.trim() {
+            "design" => Ok(DecisionKind::Design),
+            "direction" => Ok(DecisionKind::Direction),
+            "policy" => Ok(DecisionKind::Policy),
+            other => Err(format!("kind は design / direction / policy のみ: {other}")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionKind::Design => "design",
+            DecisionKind::Direction => "direction",
+            DecisionKind::Policy => "policy",
         }
     }
 }
@@ -87,6 +121,8 @@ pub struct Decision {
     pub id: String,
     pub title: String,
     pub status: DecisionStatus,
+    /// 判断の種類 (design / direction / policy)。無タグは None。
+    pub kind: Option<DecisionKind>,
     pub rationale: String,
     pub links: DecisionLinks,
     pub supersedes: Vec<String>,
@@ -123,6 +159,10 @@ impl Decision {
     fn render(&self) -> String {
         let mut out = format!("# {}\n\n", self.title);
         out.push_str(&format!("## Status\n\n{}\n\n", self.status.as_str()));
+
+        if let Some(k) = self.kind {
+            out.push_str(&format!("## Kind\n\n{}\n\n", k.as_str()));
+        }
 
         if !self.rationale.trim().is_empty() {
             out.push_str(&format!("## Rationale\n\n{}\n\n", self.rationale.trim()));
@@ -200,6 +240,11 @@ impl Decision {
             .map(|s| s.text())
             .ok_or_else(|| "Status セクションが必須".to_string())
             .and_then(|t| DecisionStatus::parse(&t))?;
+
+        let kind = match doc.take("Kind").map(|s| s.text()) {
+            Some(t) if !t.trim().is_empty() => Some(DecisionKind::parse(&t)?),
+            _ => None,
+        };
 
         let rationale = doc.take("Rationale").map(|s| s.text()).unwrap_or_default();
 
@@ -279,6 +324,7 @@ impl Decision {
             id: id.to_string(),
             title,
             status,
+            kind,
             rationale,
             links,
             supersedes,
@@ -401,7 +447,19 @@ pub fn list_decisions(owox_dir: &Path) -> Result<Vec<Decision>, String> {
 ///
 /// today は呼び出し側 (mcp) が与える `YYYYMMDD` (core は時計を読まない)。
 pub fn record_decision(owox_dir: &Path, today: &str, input: RecordInput) -> Envelope {
-    record_decision_full(owox_dir, today, input, None, Vec::new())
+    record_decision_full(owox_dir, today, input, None, None, Vec::new())
+}
+
+/// 種類タグ (design / direction / policy) と解凍パスを紐づけて記録する。decision.record tool 経路。
+/// 種類は判断を分類するだけで層は分けない (`docs/decisions/20260628-設計判断の種別.md`)。
+pub fn record_decision_with_kind(
+    owox_dir: &Path,
+    today: &str,
+    input: RecordInput,
+    kind: Option<DecisionKind>,
+    authorizes: Vec<String>,
+) -> Envelope {
+    record_decision_full(owox_dir, today, input, kind, None, authorizes)
 }
 
 /// 承認時に canon へ適用する具体変更を紐づけて open ゲートを記録する。
@@ -412,7 +470,7 @@ pub fn record_decision_with_change(
     input: RecordInput,
     proposed_change: Option<ProposedChange>,
 ) -> Envelope {
-    record_decision_full(owox_dir, today, input, proposed_change, Vec::new())
+    record_decision_full(owox_dir, today, input, None, proposed_change, Vec::new())
 }
 
 /// guarded 層のコード操作を承認時に解凍するパスを紐づけて open ゲートを記録する。
@@ -424,15 +482,16 @@ pub fn record_decision_with_authorization(
     input: RecordInput,
     authorizes: Vec<String>,
 ) -> Envelope {
-    record_decision_full(owox_dir, today, input, None, authorizes)
+    record_decision_full(owox_dir, today, input, None, None, authorizes)
 }
 
-/// open ゲート (来歴) を 1 件記録する共通経路。canon 適用 (proposed_change)・コード解凍 (authorizes)
-/// の有無を引数で受け、構築を 1 箇所に集約する。
+/// open ゲート (来歴) を 1 件記録する共通経路。種類タグ (kind)・canon 適用 (proposed_change)・
+/// コード解凍 (authorizes) の有無を引数で受け、構築を 1 箇所に集約する。
 fn record_decision_full(
     owox_dir: &Path,
     today: &str,
     input: RecordInput,
+    kind: Option<DecisionKind>,
     proposed_change: Option<ProposedChange>,
     authorizes: Vec<String>,
 ) -> Envelope {
@@ -450,6 +509,7 @@ fn record_decision_full(
         id: id.clone(),
         title: input.title,
         status: input.status,
+        kind,
         rationale: input.rationale,
         links: input.links,
         supersedes: input.supersedes,
@@ -486,6 +546,31 @@ pub fn load_decision(owox_dir: &Path, id: &str) -> Result<Decision, String> {
         }
     })?;
     Decision::parse(id, &text)
+}
+
+/// decision.get。来歴 1 件の全文を構造化して返す (canon 直読み禁止の読み口)。
+pub fn get_decision(owox_dir: &Path, id: &str) -> Envelope {
+    let bare_id = id.trim().strip_prefix("owox:dec:").unwrap_or(id.trim());
+    match load_decision(owox_dir, bare_id) {
+        Ok(d) => Envelope::ok(
+            "Decision.",
+            json!({
+                "id": d.id,
+                "title": d.title,
+                "status": d.status.as_str(),
+                "kind": d.kind.map(|k| k.as_str()),
+                "rationale": d.rationale,
+                "links": {
+                    "requirement": d.links.requirement,
+                    "work": d.links.work,
+                    "verification": d.links.verification,
+                },
+                "supersedes": d.supersedes,
+                "authorizes": d.authorizes,
+            }),
+        ),
+        Err(err) => Envelope::failed(err),
+    }
 }
 
 /// gate.list。status=open の来歴 (未承認の判断点) を返す。
@@ -785,6 +870,50 @@ mod tests {
     }
 
     #[test]
+    fn kind_parses_and_rejects_unknown() {
+        assert_eq!(DecisionKind::parse("design").unwrap(), DecisionKind::Design);
+        assert_eq!(
+            DecisionKind::parse(" direction ").unwrap(),
+            DecisionKind::Direction
+        );
+        assert!(DecisionKind::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn kind_round_trips_through_render_and_parse() {
+        let dir = tempdir();
+        let env = record_decision_with_kind(
+            &dir,
+            "20260628",
+            input("hexagonal layering", DecisionStatus::Adopted),
+            Some(DecisionKind::Design),
+            Vec::new(),
+        );
+        let id = env.data.unwrap()["id"].as_str().unwrap().to_string();
+        let d = load_decision(&dir, &id).unwrap();
+        assert_eq!(d.kind, Some(DecisionKind::Design));
+        // 種類無しは None のまま (record_decision 経路)。
+        let env2 = record_decision(&dir, "20260628", input("plain", DecisionStatus::Adopted));
+        let id2 = env2.data.unwrap()["id"].as_str().unwrap().to_string();
+        assert_eq!(load_decision(&dir, &id2).unwrap().kind, None);
+    }
+
+    #[test]
+    fn get_decision_exposes_kind() {
+        let dir = tempdir();
+        let env = record_decision_with_kind(
+            &dir,
+            "20260628",
+            input("a design call", DecisionStatus::Adopted),
+            Some(DecisionKind::Design),
+            Vec::new(),
+        );
+        let id = env.data.unwrap()["id"].as_str().unwrap().to_string();
+        let got = get_decision(&dir, &id);
+        assert_eq!(got.data.unwrap()["kind"], "design");
+    }
+
+    #[test]
     fn authorization_round_trips_and_is_guarded() {
         let dir = tempdir();
         let env = record_decision_with_authorization(
@@ -912,6 +1041,54 @@ mod tests {
         );
         // rejected はキューに残らない。
         assert!(list_auto_pending(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_decision_returns_rationale() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("decisions")).unwrap();
+        std::fs::write(
+            dir.join("decisions/20260625-r.md"),
+            "# My decision\n\n## Status\n\nadopted\n\n## Rationale\n\nThis is the rationale.\n",
+        )
+        .unwrap();
+        let env = get_decision(&dir, "20260625-r");
+        assert_eq!(env.status, crate::envelope::Status::Ok);
+        let data = env.data.unwrap();
+        assert_eq!(data["id"], "20260625-r");
+        assert_eq!(data["title"], "My decision");
+        assert_eq!(data["status"], "adopted");
+        assert!(
+            data["rationale"]
+                .as_str()
+                .unwrap()
+                .contains("This is the rationale."),
+            "rationale が返っていない: {:?}",
+            data["rationale"]
+        );
+    }
+
+    #[test]
+    fn get_decision_accepts_owox_dec_prefix() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("decisions")).unwrap();
+        std::fs::write(
+            dir.join("decisions/20260625-p.md"),
+            "# Prefix test\n\n## Status\n\nopen\n",
+        )
+        .unwrap();
+        // owox:dec:<id> プレフィックス付きで渡しても動く。
+        let env = get_decision(&dir, "owox:dec:20260625-p");
+        assert_eq!(env.status, crate::envelope::Status::Ok);
+        assert_eq!(env.data.unwrap()["id"], "20260625-p");
+    }
+
+    #[test]
+    fn get_decision_fails_for_missing_id() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("decisions")).unwrap();
+        let env = get_decision(&dir, "nonexistent-id");
+        assert_eq!(env.status, crate::envelope::Status::Failed);
     }
 
     /// テスト用の一意な一時ディレクトリ (依存を足さず std だけで作る)。

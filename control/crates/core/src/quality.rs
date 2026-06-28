@@ -13,6 +13,19 @@ use serde::Deserialize;
 
 use crate::model::{ForbiddenTerm, VerifyCheck};
 
+/// 配送調整の設定。quality.toml の `[delivery]` 節。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryConfig {
+    /// SessionStart で always trigger のエントリを出す上限件数。既定 3。
+    pub always_limit: usize,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        DeliveryConfig { always_limit: 3 }
+    }
+}
+
 /// 品質バー。quality.toml の型付き表現。無ければ無効 (opt-in)。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Quality {
@@ -27,6 +40,18 @@ pub struct Quality {
     /// 層別自律度 (`[[layers]]`)。AI が人間承認なしで変えてよい度合いを層ごとに変える。
     /// architecture=layered の時だけ効く層機構 (`docs/decisions/20260618-Phase9-性質軸適応機構.md`)。
     pub layers: Vec<Layer>,
+    /// 配送調整 (`[delivery]`)。always 上限などを設定する。
+    pub delivery: DeliveryConfig,
+    /// apply_patch の一括削除ガード閾値。この件数以上のファイル削除を 1 パッチで行おうとしたら
+    /// 機械強制で deny する。0 は無効。省略時の既定は 3。
+    pub bulk_delete_threshold: Option<usize>,
+}
+
+impl Quality {
+    /// apply_patch の一括削除ガード閾値。省略時は既定の 3。0 は無効扱いにする呼び出し側が担う。
+    pub fn bulk_delete_threshold(&self) -> usize {
+        self.bulk_delete_threshold.unwrap_or(3)
+    }
 }
 
 /// 層の自律度。核ほど慎重。ゲート合成のはしごへ写像する (`gate.rs`)。
@@ -83,9 +108,9 @@ pub struct RoutineConfig {
 
 impl Default for RoutineConfig {
     fn default() -> Self {
-        // 既定は緩め。狼少年化を避け、対話検証で詰める。
+        // 既定は要件初期値の 3 (docs/requirements/20260625-skill-script化誘導.md)。
         RoutineConfig {
-            min_occurrences: 5,
+            min_occurrences: 3,
             max_len: 4,
         }
     }
@@ -114,6 +139,12 @@ pub struct DecayConfig {
     /// 委譲検出 (`[[decay.checks]]`)。owox が走らせ非ゼロ終了を decay として報告する advisory な検査。
     /// 完了を判定する `[[verify.checks]]` と区別する。
     pub checks: Vec<VerifyCheck>,
+    /// 庭師: 床文脈のしきい値。このトークン数を超えたら floor-bloat を報告。
+    pub gardening_floor_bloat_tokens: usize,
+    /// 庭師: 低利用の日数しきい値。この日数を超えたら low-use を報告。
+    pub gardening_low_use_days: u32,
+    /// 庭師: 低利用のコミット数しきい値。このコミット数を超えたら low-use を報告。
+    pub gardening_low_use_commits: usize,
 }
 
 impl Default for DecayConfig {
@@ -131,6 +162,9 @@ impl Default for DecayConfig {
             practice_similarity: 0.5,
             min_duplicate_bytes: 64,
             checks: Vec::new(),
+            gardening_floor_bloat_tokens: 3000,
+            gardening_low_use_days: 30,
+            gardening_low_use_commits: 20,
         }
     }
 }
@@ -181,6 +215,16 @@ struct QualityRaw {
     routine: RoutineRaw,
     #[serde(default)]
     layers: Vec<LayerRaw>,
+    #[serde(default)]
+    delivery: DeliveryRaw,
+    bulk_delete_threshold: Option<usize>,
+}
+
+/// `[delivery]` の生表現。各値は省略可で、省略時は DeliveryConfig の既定値。
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DeliveryRaw {
+    always_limit: Option<usize>,
 }
 
 /// `[[layers]]` の生表現。autonomy は文字列で受け Autonomy::parse で検証する。
@@ -216,6 +260,9 @@ struct DecayRaw {
     min_duplicate_bytes: Option<usize>,
     #[serde(default)]
     checks: Vec<DecayCheckRaw>,
+    gardening_floor_bloat_tokens: Option<usize>,
+    gardening_low_use_days: Option<u32>,
+    gardening_low_use_commits: Option<usize>,
 }
 
 /// `[[decay.checks]]` の生表現。model の VerifyCheckRaw と同じ流儀で解釈する。
@@ -304,8 +351,21 @@ impl Quality {
                     .map(|c| VerifyCheck {
                         name: c.name,
                         command: c.command,
+                        evidence_paths: Vec::new(),
                     })
                     .collect(),
+                gardening_floor_bloat_tokens: raw
+                    .decay
+                    .gardening_floor_bloat_tokens
+                    .unwrap_or(d.gardening_floor_bloat_tokens),
+                gardening_low_use_days: raw
+                    .decay
+                    .gardening_low_use_days
+                    .unwrap_or(d.gardening_low_use_days),
+                gardening_low_use_commits: raw
+                    .decay
+                    .gardening_low_use_commits
+                    .unwrap_or(d.gardening_low_use_commits),
             },
             routine: {
                 let r = RoutineConfig::default();
@@ -326,6 +386,13 @@ impl Quality {
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?,
+            delivery: {
+                let dv = DeliveryConfig::default();
+                DeliveryConfig {
+                    always_limit: raw.delivery.always_limit.unwrap_or(dv.always_limit),
+                }
+            },
+            bulk_delete_threshold: raw.bulk_delete_threshold,
         })
     }
 

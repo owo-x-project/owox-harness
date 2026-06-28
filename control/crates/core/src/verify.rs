@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::decay::DecayFinding;
 use crate::envelope::{Envelope, Gate};
-use crate::model::VerifyConfig;
+use crate::model::{RuleEntry, Rules, VerifyConfig};
 use crate::quality::QualityViolation;
 use crate::requirement::{Met, Requirement, RequirementStatus};
 
@@ -43,6 +43,57 @@ pub struct CheckResult {
     pub name: String,
     pub passed: bool,
     pub detail: String,
+}
+
+/// phase rules の構造的整合性を機械検査する。
+///
+/// # 機械検出対象 (散文の意味違反は対象外)
+///
+/// 1. `trigger:path` エントリが `paths` を持たない → パスフィルタが機能しない
+/// 2. `trigger:operation` エントリが `operations` を持たない → 操作フィルタが機能しない
+/// 3. `trigger:always` エントリが `operations` または `paths` を設定している → 使われない属性
+///
+/// これら以外の「正しいかどうか」は人間が判断する。
+pub fn check_phase_rules(rules: &Rules) -> Vec<String> {
+    check_rule_entry_consistency(&rules.entries)
+}
+
+/// エントリ単位の構造整合性チェック。`check_phase_rules` の内部実装。
+fn check_rule_entry_consistency(entries: &[RuleEntry]) -> Vec<String> {
+    let mut issues = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let label = if e.section.is_empty() {
+            format!("entry[{i}]")
+        } else {
+            format!("entry[{i}] (section: {})", e.section)
+        };
+        let triggers: Vec<&str> = e.triggers.iter().map(|s| s.as_str()).collect();
+        let has_always = triggers.contains(&"always");
+        let has_path = triggers.contains(&"path");
+        let has_operation = triggers.contains(&"operation");
+
+        if has_path && e.paths.is_empty() {
+            issues.push(format!(
+                "{label}: trigger:path が設定されているが paths が空。パスフィルタが機能しない。"
+            ));
+        }
+        if has_operation && e.operations.is_empty() {
+            issues.push(format!(
+                "{label}: trigger:operation が設定されているが operations が空。操作フィルタが機能しない。"
+            ));
+        }
+        if has_always && !e.operations.is_empty() {
+            issues.push(format!(
+                "{label}: trigger:always に operations が設定されている。always エントリは操作フィルタを使わない。"
+            ));
+        }
+        if has_always && !e.paths.is_empty() {
+            issues.push(format!(
+                "{label}: trigger:always に paths が設定されている。always エントリはパスフィルタを使わない。"
+            ));
+        }
+    }
+    issues
 }
 
 /// 検査を順に実行し結果を集める。verify.run と commit ゲートが共用する
@@ -196,12 +247,26 @@ pub fn run_verify(
         .iter()
         .map(|f| json!({ "kind": f.kind, "subject": f.subject, "detail": f.detail }))
         .collect();
+    // accepted なのに基準0の要件を advisory 警告として収集する (block しない)。
+    // draft は整形中で許容、superseded は対象外。
+    let warnings: Vec<_> = requirements
+        .iter()
+        .filter(|r| r.status == RequirementStatus::Accepted && r.criteria.is_empty())
+        .map(|r| {
+            json!({
+                "kind": "no_acceptance_criteria",
+                "requirement": r.id,
+                "detail": format!("Requirement {} has no acceptance criteria.", r.id),
+            })
+        })
+        .collect();
     let data = json!({
         "results": results,
         "completion": completion,
         "requirements": req_details,
         "quality": quality,
         "decay": decay,
+        "warnings": warnings,
     });
 
     // 封筒 status: 検査失敗のみ failed (要件 failed は link 先検査の失敗を含むのでここに吸収)。
@@ -290,6 +355,7 @@ mod tests {
                 .map(|c| VerifyCheck {
                     name: c.to_string(),
                     command: c.to_string(),
+                    evidence_paths: Vec::new(),
                 })
                 .collect(),
         }
@@ -357,6 +423,7 @@ mod tests {
             layer: None,
             stage: None,
             kind: None,
+            changes: Vec::new(),
         }
     }
 
@@ -380,5 +447,132 @@ mod tests {
         assert_eq!(data["completion"]["verification"], "passed");
         assert_eq!(data["completion"]["requirement"], "needs_human");
         assert_eq!(data["requirements"][0]["unlinked"], 1);
+    }
+
+    // ── 機能C-2 テスト ──
+
+    fn req_no_criteria(id: &str, status: RequirementStatus) -> Requirement {
+        Requirement {
+            id: id.to_string(),
+            title: "no criteria".to_string(),
+            status,
+            statement: String::new(),
+            criteria: Vec::new(),
+            links: crate::requirement::RequirementLinks::default(),
+            supersedes: Vec::new(),
+            priority: None,
+            layer: None,
+            stage: None,
+            kind: None,
+            changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn accepted_requirement_with_no_criteria_appears_in_warnings() {
+        // accepted で基準0の要件は warnings に出る (block しない)。
+        let req = req_no_criteria("20260628-no-criteria", RequirementStatus::Accepted);
+        let env = run_verify(&cfg(&["true"]), &[req], &[], &[], Path::new("."));
+        // block でないので status は needs_human (失敗しない)。
+        assert_ne!(env.status, Status::Failed);
+        let data = env.data.unwrap();
+        let warnings = data["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["kind"], "no_acceptance_criteria");
+        assert!(
+            warnings[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("20260628-no-criteria"),
+            "{}",
+            warnings[0]["detail"]
+        );
+    }
+
+    #[test]
+    fn draft_requirement_with_no_criteria_is_not_warned() {
+        // draft は整形中なので基準0でも警告しない (雑音を避ける)。
+        let req = req_no_criteria("20260628-draft", RequirementStatus::Draft);
+        let env = run_verify(&cfg(&["true"]), &[req], &[], &[], Path::new("."));
+        let data = env.data.unwrap();
+        assert!(data["warnings"].as_array().unwrap().is_empty());
+    }
+
+    // ── check_phase_rules テスト ──
+
+    fn rule_entry(
+        section: &str,
+        triggers: &[&str],
+        operations: &[&str],
+        paths: &[&str],
+    ) -> crate::model::RuleEntry {
+        crate::model::RuleEntry {
+            phase: None,
+            section: section.to_string(),
+            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+            operations: operations.iter().map(|s| s.to_string()).collect(),
+            paths: paths.iter().map(|s| s.to_string()).collect(),
+            text: "dummy rule text".to_string(),
+        }
+    }
+
+    fn rules_with(entries: Vec<crate::model::RuleEntry>) -> crate::model::Rules {
+        crate::model::Rules {
+            entries,
+            ..Default::default()
+        }
+    }
+
+    /// 整合したエントリは問題なし。
+    #[test]
+    fn check_phase_rules_clean_entries_no_issues() {
+        let rules = rules_with(vec![
+            rule_entry("Common", &["always"], &[], &[]),
+            rule_entry("Edit", &["operation"], &["edit"], &[]),
+            rule_entry("File", &["path"], &[], &["src/"]),
+        ]);
+        assert!(check_phase_rules(&rules).is_empty());
+    }
+
+    /// trigger:path で paths が空 → 問題を報告する。
+    #[test]
+    fn check_phase_rules_path_trigger_without_paths_is_reported() {
+        let rules = rules_with(vec![rule_entry("Sec", &["path"], &[], &[])]);
+        let issues = check_phase_rules(&rules);
+        assert!(!issues.is_empty(), "問題が報告されるはず");
+        assert!(
+            issues[0].contains("paths が空"),
+            "paths 空の旨が含まれるはず: {issues:?}"
+        );
+    }
+
+    /// trigger:operation で operations が空 → 問題を報告する。
+    #[test]
+    fn check_phase_rules_operation_trigger_without_operations_is_reported() {
+        let rules = rules_with(vec![rule_entry("Sec", &["operation"], &[], &[])]);
+        let issues = check_phase_rules(&rules);
+        assert!(!issues.is_empty());
+        assert!(issues[0].contains("operations が空"), "{issues:?}");
+    }
+
+    /// trigger:always に operations 設定 → 矛盾として報告する。
+    #[test]
+    fn check_phase_rules_always_with_operations_is_reported() {
+        let rules = rules_with(vec![rule_entry("Sec", &["always"], &["edit"], &[])]);
+        let issues = check_phase_rules(&rules);
+        assert!(!issues.is_empty());
+        assert!(
+            issues[0].contains("operations が設定されている"),
+            "{issues:?}"
+        );
+    }
+
+    /// trigger:always に paths 設定 → 矛盾として報告する。
+    #[test]
+    fn check_phase_rules_always_with_paths_is_reported() {
+        let rules = rules_with(vec![rule_entry("Sec", &["always"], &[], &["src/"])]);
+        let issues = check_phase_rules(&rules);
+        assert!(!issues.is_empty());
+        assert!(issues[0].contains("paths が設定されている"), "{issues:?}");
     }
 }

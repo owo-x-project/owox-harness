@@ -7,7 +7,6 @@ use std::path::Path;
 
 use crate::model::{Brand, Canon, Irreversible, Phase, Rules};
 use crate::quality::Quality;
-use crate::skill::Skill;
 
 /// 床コンテキスト。session 開始と圧縮後に AI へ注入する常時の地図。
 ///
@@ -23,13 +22,6 @@ pub fn floor_context(canon: &Canon) -> String {
     let mut out = String::new();
     out.push_str("# Project context\n\n");
 
-    // 性質軸を一度だけ解決し、ルーティングと向き付け両方で使う。読めない時はフル方法論既定で振る舞う。
-    let axes = canon.profile.resolve().ok();
-
-    render_orientation(&mut out);
-    render_routing(&mut out, axes.as_ref());
-    render_orchestration(&mut out, canon);
-
     // 応答言語の追従。指示文は英語固定だが、人間への応答だけ正本設定の言語に合わせる
     // (`docs/decisions/20260613-Phase5-実機検証の是正.md`)。未設定なら注入しない。
     if let Some(lang) = &canon.settings.language {
@@ -41,288 +33,44 @@ pub fn floor_context(canon: &Canon) -> String {
     out.push_str(&canon.brand.vision);
     out.push_str("\n\n");
 
-    // 全体スタイルは作業全般に効くため常時。他の brand 項目は語トリガ push へ寄せる。
-    render_list(&mut out, "Style", &canon.brand.style);
-
     out.push_str("## Project state\n\n");
     out.push_str(&format!("Phase: {}.\n", canon.state.phase.as_str()));
     out.push_str(phase_guidance(canon.state.phase));
     out.push_str("\n\n");
 
-    // 性質 (固定) を 1 行で。どの方法論モジュールが効くかを向き付ける。詳細は profile.get。
-    if let Some(axes) = &axes {
-        out.push_str("## Project nature\n\n");
-        out.push_str(&format!(
-            "requirements-shape={}, prioritization={}, delivery={}, architecture={}. These turn the development methodology on or off; see profile.get for which modules are active.\n\n",
-            axes.requirements_shape.as_str(),
-            axes.prioritization.as_str(),
-            axes.delivery.as_str(),
-            axes.architecture.as_str(),
-        ));
-    }
+    out.push_str("## Canon\n\n");
+    out.push_str(
+        "Do not read or edit the canon under .owox/ directly. Use canon.add to add, canon.propose to change or remove, and owox lookup tools to read.\n\n",
+    );
 
-    // 用語名は live な canon から注入する (動的 CRUD で古びないため)。定義は出現時 push と glossary.lookup。
-    // 肥大化時 (上限超過) は一覧を出さず glossary.lookup へ寄せる (床のトークンを守る)。
-    if !canon.glossary.entries.is_empty() {
-        out.push_str("## Glossary terms\n\n");
-        let total = canon.glossary.entries.len();
-        if total <= canon.settings.context.glossary_floor_max {
-            out.push_str(
-                "These names have project-specific meanings. Their definitions are injected when they appear; to look one up, use glossary.lookup. Do not read the canon files directly.\n",
-            );
-            for entry in &canon.glossary.entries {
-                out.push_str("- ");
-                out.push_str(&entry.term);
-                out.push('\n');
-            }
-        } else {
-            out.push_str(&format!(
-                "This project defines {total} glossary terms. Their definitions are injected when a term appears in your work; look any term up with glossary.lookup. Do not read the canon files directly.\n",
-            ));
-        }
-        out.push('\n');
-    }
-
-    // 成長層 (practices) のライブ注入。経験から育つ運用指針を届ける
-    // (`docs/decisions/20260614-Phase7-経験IOと二層ルール.md`)。肥大化時は新しい順に上位だけ床へ出し、
-    // 残りは practice.lookup でオンデマンドへ降格する
-    // (`docs/decisions/20260621-Phase9-経験層スケールとGitHub連携とkickoff束ね.md`)。
-    if !canon.practices.entries.is_empty() {
-        out.push_str("## Practices\n\n");
-        out.push_str("Operating practices grown from this project's experience. Follow them.\n");
-        let max = canon.settings.context.practices_floor_max;
-        let total = canon.practices.entries.len();
-        if total <= max {
-            for p in &canon.practices.entries {
-                out.push_str("- ");
-                out.push_str(&p.text);
-                out.push('\n');
-            }
-        } else {
-            let mut recent: Vec<&crate::model::Practice> = canon.practices.entries.iter().collect();
-            // 日付降順で新しい順。鮮度の高い指針ほど効くため (decay と整合)。
-            recent.sort_by(|a, b| b.date.cmp(&a.date));
-            for p in recent.into_iter().take(max) {
-                out.push_str("- ");
-                out.push_str(&p.text);
-                out.push('\n');
-            }
-            out.push_str(&format!(
-                "Showing the {max} most recent of {total} practices; look up older ones by keyword with practice.lookup.\n",
-            ));
-        }
-        out.push('\n');
-    }
-
-    out.push_str("## Read next\n\n");
-    out.push_str("- the context tool: what to read for the current task\n");
-    out.push_str("- the next tool: what to decide next + ready tasks\n");
+    out.push_str("## Entry map\n\n");
+    out.push_str("- Use kickoff to orient.\n");
+    out.push_str(
+        "- Use next to see the intent gate (the human decides) and the action owox asserts.\n",
+    );
+    out.push_str("- Use context to find what to read.\n");
+    out.push_str("- Use verify before finishing.\n");
+    out.push_str("- Use review to inspect changes.\n");
+    out.push_str("- Use skill to grow or manage skills.\n");
+    out.push_str(
+        "- Use rules.lookup, glossary.lookup, and practice.lookup when rules or terms matter.\n",
+    );
 
     out
 }
 
-/// 育てたスキルの床注入 (能動提示)。session 開始時に「このプロジェクトで使える技」を先出しし、
-/// 着手前に該当を能動的に使うよう促す (`docs/decisions/20260619-承認と自動改善ループ.md`)。
+/// command_routing_findings が配線検査する「コマンド入口ツール」の一覧。
 ///
-/// 床へは load_skills で読めるプロジェクト製スキルだけを出す (テストは走らせない・高速優先)。
-/// 名前と短い説明のみで膨らみを抑える。詳細・テスト状態は skill.list へ。空なら何も出さない。
-pub fn render_skills_section(skills: &[Skill]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("## Skills you can use\n\n");
-    out.push_str(
-        "Skills grown in this project. Before you design or implement, check which of these and which practices above fit the task, and use them. Promoted ones may auto-invoke; invoke a registered one by name. See skill.list for test status.\n",
-    );
-    for s in skills {
-        out.push_str("- ");
-        out.push_str(&s.name);
-        if s.promoted {
-            out.push_str(" [promoted]");
-        }
-        let desc = s.description.trim();
-        if !desc.is_empty() {
-            out.push_str(" — ");
-            out.push_str(desc);
-        }
-        out.push('\n');
-    }
-    out.push('\n');
-    out
-}
-
-/// 向き付け。正本の写しでなく「どう振る舞うか」を最小で案内する。AGENTS.md 廃止で床へ移した。
-fn render_orientation(out: &mut String) {
-    out.push_str("## How this project works\n\n");
-    out.push_str(
-        "Your guidance reaches you through this session context and the owox tools. Do not read or edit the canon under .owox/ directly.\n",
-    );
-    out.push_str(
-        "- To add to the canon use canon.add; to change or remove part of it use canon.propose, which a human approves before owox applies it. Never edit generated files to change the canon, since your edits are overwritten on the next generation.\n",
-    );
-    out.push_str("- You may author and read skills under .owox/skills/.\n\n");
-}
-
-/// 意図ルーティング表。人間が tool 名や用語を言わなくても、要望から使う tool へ AI が飛べるようにする。
+/// このリストは、commands.toml のいずれかのコマンド本体から参照されているべきツールを定義する。
+/// command_routing_findings はこの一覧を真実源として、各ツールが実際にコマンド本体に
+/// 現れているかを動的に検査し、漏れがあれば "entry-routing" 助言を出す。
 ///
-/// 曖昧なリクエストでも意味が十分なら動かす要 (`docs/handoff/20260616-コンテキスト配信の再設計.md`)。
-/// 注入文に括弧補足は使わない (1 文で分かるよう書く)。
-fn render_routing(out: &mut String, axes: Option<&crate::profile::Axes>) {
-    out.push_str("## Acting on what the human asks\n\n");
-    out.push_str(
-        "Map the request to the right tool even when the human does not name a tool or a project term:\n",
-    );
-    out.push_str("- Change or remove a rule, value, principle, non-goal, or term definition: first read the current wording with rules.lookup or glossary.lookup, then use canon.propose, which a human approves before owox applies it. Never edit files to change the canon.\n");
-    out.push_str(
-        "- Add a new rule, value, principle, term, or a lasting practice to follow: use canon.add.\n",
-    );
-    out.push_str(
-        "- Record the results of investigating how something works, such as an API, a library, or a protocol: use knowledge.add, and recall it later with knowledge.lookup. This is research knowledge, distinct from a lasting practice to follow, which uses canon.add.\n",
-    );
-    out.push_str("- Decide what to work on next: use the next tool. Find what to read or where something lives: use the context tool.\n");
-    out.push_str("- Get the project's rules and policies: use rules.lookup, and call it before acting whenever the request concerns rules, policy, deletion, dependencies, or safety, whatever language it is written in. Get the meaning of a project-specific term: use glossary.lookup. Recall an operating practice not shown above: use practice.lookup.\n");
-    out.push_str("- Clean up, prune, or remove unneeded code: use review.lenses for the pruning perspective, then follow the deletion policy and verify before removing anything.\n");
-    out.push_str(&render_requirement_routing(axes));
-    out.push_str(
-        "- Set or change the project's nature that decides whether the methodology applies: use profile.set; see the current nature with profile.get; infer it for an existing codebase with profile.detect, which gives a draft a human confirms. Reverse-generate draft guardrails such as layers, boundaries, and irreversible operations from an existing codebase with canon.detect, also a human-confirmed proposal.\n",
-    );
-    out.push_str(
-        "- Keep a scratch note tied to the current branch, or recall what you were doing on it: use branch.note and branch.notes. This is branch-scoped; use decision.record for durable judgments.\n",
-    );
-    out.push_str(
-        "- When the human corrects or overrides something you did: capture the durable lesson with correction.note, which drafts it as a proposed practice for the human to approve. Do not wait to be told to make a rule.\n",
-    );
-    out.push_str(
-        "- When the human says to proceed automatically while they are away or asleep: turn on automatic approval with gate.auto_enable; its confirmation prompt is their consent and it lasts only this session. While it is on, approve non-guarded gates with gate.auto_approve instead of gate.approve. Review what was auto-approved with the next tool, and confirm with gate.confirm or undo with gate.revert.\n\n",
-    );
-}
-
-/// オーケストレーションパターンの床注入 (能動提示)。
-///
-/// 親エージェントが唯一のオーケストレータ (1階層) であることと、
-/// 役割・変種・呼び出しルールを能動的に届ける。
-/// 全て advisory: パターン適用は親が状況判断する。機械強制しない。
-/// (`docs/decisions/20260620-オーケストレーション具体化.md` 観点1・観点3)
-fn render_orchestration(out: &mut String, canon: &crate::model::Canon) {
-    out.push_str("## Orchestration\n\n");
-
-    // 担当。重い作業の既定委譲を能動提示し、親が抱え込んでコンテキストを浪費するのを防ぐ。
-    out.push_str(
-        "You are the sole orchestrator and spawn agents one level deep. \
-The default skeleton is investigate → plan → implement → verify, with review before merge. \
-By default delegate context-heavy work such as wide investigation, broad search, and review to agents and keep only their condensed results, on your own judgment without being told, so your own context stays lean and you stay a reliable manager through a long session.\n\n",
-    );
-
-    // 役割。canon から動的列挙してプロジェクト上書きを反映する。
-    out.push_str("Roles defined in this project:\n");
-    for role in &canon.agents.roles {
-        out.push_str("- ");
-        out.push_str(&role.id);
-        out.push_str(": ");
-        out.push_str(&role.responsibility);
-        out.push('\n');
-    }
-    out.push('\n');
-
-    // 役割の与え方 (フォールバック)。ネイティブ subagent が named role でなく注入指示で立つため、
-    // 親が spawn 時に役割の責務と制限を指示として渡す (`docs/validation/20260620-Phase9-オーケストレーション実機.md`)。
-    out.push_str(
-        "Your platform spawns agents by giving them instructions, not by selecting a named role, \
-so when you spawn an agent for a role, pass that role's responsibility above and its limits as its instructions. \
-Limits to pass on: read-only roles do not edit code; \
-the implement role edits only the supervised and free layers and does not commit; \
-no role performs irreversible or external operations.\n\n",
-    );
-
-    // 変種。review 変種は spawn 時の prompt 上書きで専門化する。多視点は fan-out。
-    if !canon.agents.variants.is_empty() {
-        out.push_str("Variants specialize a role at spawn time via prompt injection:\n");
-        for v in &canon.agents.variants {
-            out.push_str("- ");
-            out.push_str(&v.id);
-            out.push_str(" — applies to ");
-            out.push_str(&v.applies_to);
-            out.push_str(": ");
-            out.push_str(&v.prompt);
-            out.push('\n');
-        }
-        out.push_str(
-            "For multi-perspective review, fan out the review role once per lens in review.lenses.\n\n",
-        );
-    }
-
-    // 呼び出しルール。
-    out.push_str(
-        "Scale: small tasks may skip investigate and heavy review; \
-large tasks or the initial phase warrant the full skeleton. \
-Use the project phase as a signal, not a machine constraint.\n",
-    );
-    out.push_str(
-        "Parallelism: fan out read-only agents concurrently; \
-run implement agents in sequence to avoid file conflicts.\n",
-    );
-    out.push_str(
-        "Handoff: record durable results in .owox rather than in conversation; \
-promote transient findings to task, decision, knowledge, or verification as appropriate. \
-Subagents cannot self-approve guarded changes — when a guarded asset must change, \
-surface the need to the parent and hand it back to a human.\n\n",
-    );
-}
-
-/// 要件登録の意図ルーティング行。性質軸で文面を出し入れする。
-///
-/// requirements-shape=prfaq の時は PRFAQ 起草 (プレスリリースの枠組みと着手前の人間合意) を直書きし、
-/// 方法論が req スキル本文止まりで発火しない事故を防ぐ (`docs/validation/20260620-要件分類とreq到達性.md`)。
-/// 種類分類と「技術設計の制約は来歴へ」は常時。優先度を人間へは prioritization=ideal-first の時だけ。
-fn render_requirement_routing(axes: Option<&crate::profile::Axes>) -> String {
-    use crate::profile::{Prioritization, RequirementsShape};
-    let prfaq = axes.is_some_and(|a| matches!(a.requirements_shape, RequirementsShape::Prfaq));
-    let ideal_first = axes.is_some_and(|a| matches!(a.prioritization, Prioritization::IdealFirst));
-
-    let mut line = String::from("- Capture or refine what the work must satisfy: ");
-    if prfaq {
-        line.push_str("work backwards — frame it as a short press release of who benefits and why, and pass that benefit when you create the requirement; get the human's agreement on the what and the why before building. ");
-    } else {
-        line.push_str("use the req skill to draft it the project's way. ");
-    }
-    line.push_str("Tag each requirement as functional or non-functional, and keep technical and design constraints as decisions with decision.record rather than as requirements.");
-    if ideal_first {
-        line.push_str(" Leave the priority ranking to a human.");
-    }
-    line.push_str(" Finish or commit only after running verify.run.\n");
-    line
-}
-
-/// 注入する rules 本文 (`## Rules` ラベル配下)。lookup ツールと語トリガ push が共用する。
-///
-/// 「rules」と即分かるよう `## Rules` 見出しへまとめ、各方針を `###` の小節にする (概念1の是正)。
-/// detect: の正規表現は機械検出用なので出さない。空なら無い旨を返す。
-pub fn render_rules_block(rules: &Rules) -> String {
-    if !has_rules(rules) {
-        return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
-    }
-    let mut out = String::from("## Rules\n\nThe project's rules. Follow them.\n\n");
-    render_sublist(&mut out, "Change policy", &rules.change_policy);
-    render_sublist(&mut out, "Dependency policy", &rules.dependency_policy);
-    render_sublist(&mut out, "Deletion policy", &rules.deletion_policy);
-    render_sublist(&mut out, "Safety", &rules.safety);
-
-    if !rules.irreversible.is_empty() {
-        out.push_str("### Irreversible operations\n\n");
-        out.push_str("Confirm with a human before doing any of these.\n\n");
-        for op in &rules.irreversible {
-            push_pair(&mut out, &op.operation, &op.reason);
-        }
-        out.push('\n');
-    }
-    if !rules.human_gate.is_empty() {
-        out.push_str("### Hand back to a human\n\n");
-        for gate in &rules.human_gate {
-            push_pair(&mut out, &gate.situation, &gate.reason);
-        }
-        out.push('\n');
-    }
-    out
+/// rules.lookup / glossary.lookup / practice.lookup は floor_context の Entry map で
+/// AI へ存在を知らせているが、コマンド入口ではなく AI が自身の判断で呼ぶ「バックストップ
+/// ツール」であるため、このリストには含めない。これらを含めると next / verify.run など
+/// あらゆる呼び出しで不要な "entry-routing" 助言が発生する設計上の誤りとなる。
+pub fn entry_map_tools() -> &'static [&'static str] {
+    &["kickoff", "next", "context", "verify", "review", "skill"]
 }
 
 /// 注入する brand 本文 (`## Brand` ラベル配下)。語トリガ push が使う。
@@ -348,12 +96,45 @@ fn render_brand_block(brand: &Brand) -> Option<String> {
 
 /// rules に出すべき項目が 1 つでもあるか。
 fn has_rules(rules: &Rules) -> bool {
-    !(rules.change_policy.is_empty()
-        && rules.dependency_policy.is_empty()
-        && rules.deletion_policy.is_empty()
-        && rules.safety.is_empty()
-        && rules.irreversible.is_empty()
-        && rules.human_gate.is_empty())
+    !rules.entries.is_empty() || !rules.irreversible.is_empty() || !rules.human_gate.is_empty()
+}
+
+/// phase でフィルタした時に出すべき項目が 1 つでもあるか。
+fn has_rules_for_phase(rules: &Rules, phase: Phase) -> bool {
+    rules
+        .entries
+        .iter()
+        .any(|e| e.phase.is_none() || e.phase == Some(phase))
+        || !rules.irreversible.is_empty()
+        || !rules.human_gate.is_empty()
+}
+
+/// entries をセクション別にグループ化して (section, items) のリストを返す。
+/// section が空の entries は "Common" 扱いとする。
+fn group_entries_by_section(entries: &[crate::model::RuleEntry]) -> Vec<(String, Vec<String>)> {
+    // セクション出現順を保ちつつグループ化する。
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in entries {
+        let sec = if e.section.is_empty() {
+            "Common".to_string()
+        } else {
+            e.section.clone()
+        };
+        if !groups.contains_key(&sec) {
+            order.push(sec.clone());
+            groups.insert(sec.clone(), Vec::new());
+        }
+        groups.get_mut(&sec).unwrap().push(e.text.clone());
+    }
+    order
+        .into_iter()
+        .map(|sec| {
+            let items = groups.remove(&sec).unwrap_or_default();
+            (sec, items)
+        })
+        .collect()
 }
 
 /// `- name: detail` を 1 行出す。detail が空なら name だけ。
@@ -367,22 +148,77 @@ fn push_pair(out: &mut String, name: &str, detail: &str) {
     out.push('\n');
 }
 
-/// `## title` 配下へ `- item` を並べる。空なら節ごと出さない。
-fn render_list(out: &mut String, title: &str, items: &[String]) {
-    if items.is_empty() {
-        return;
+/// 全 entries を出す (phase 不問)。`rules.lookup` の旧互換・テスト用。
+pub fn render_rules_block(rules: &Rules) -> String {
+    if !has_rules(rules) {
+        return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
     }
-    out.push_str("## ");
-    out.push_str(title);
-    out.push_str("\n\n");
-    for item in items {
-        out.push_str("- ");
-        out.push_str(item);
-        out.push('\n');
+    let mut out = String::from("## Rules\n\nThe project's rules. Follow them.\n\n");
+    for (sec, items) in group_entries_by_section(&rules.entries) {
+        render_sublist(&mut out, &sec, &items);
     }
-    out.push('\n');
+    render_irreversible_and_gates(&mut out, rules);
+    out
 }
 
+/// 現在 phase (common + 指定 phase) の entries だけを出す。`rules.lookup` と `policy_injection` の真実源。
+pub fn render_rules_block_for_phase(rules: &Rules, phase: Phase) -> String {
+    if !has_rules_for_phase(rules, phase) {
+        return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
+    }
+    let filtered: Vec<&crate::model::RuleEntry> = rules
+        .entries
+        .iter()
+        .filter(|e| e.phase.is_none() || e.phase == Some(phase))
+        .collect();
+    let mut out =
+        String::from("## Rules\n\nThe project's rules for the current phase. Follow them.\n\n");
+
+    // セクション別グループ化 (出現順)。
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in &filtered {
+        let sec = if e.section.is_empty() {
+            "Common".to_string()
+        } else {
+            e.section.clone()
+        };
+        if !groups.contains_key(&sec) {
+            order.push(sec.clone());
+            groups.insert(sec.clone(), Vec::new());
+        }
+        groups.get_mut(&sec).unwrap().push(e.text.clone());
+    }
+    for sec in order {
+        let items = groups.remove(&sec).unwrap_or_default();
+        render_sublist(&mut out, &sec, &items);
+    }
+
+    render_irreversible_and_gates(&mut out, rules);
+    out
+}
+
+/// Irreversible operations と Human gates を共通レンダリング。
+fn render_irreversible_and_gates(out: &mut String, rules: &Rules) {
+    if !rules.irreversible.is_empty() {
+        out.push_str("### Irreversible operations\n\n");
+        out.push_str("Confirm with a human before doing any of these.\n\n");
+        for op in &rules.irreversible {
+            push_pair(out, &op.operation, &op.reason);
+        }
+        out.push('\n');
+    }
+    if !rules.human_gate.is_empty() {
+        out.push_str("### Hand back to a human\n\n");
+        for gate in &rules.human_gate {
+            push_pair(out, &gate.situation, &gate.reason);
+        }
+        out.push('\n');
+    }
+}
+
+/// `## title` 配下へ `- item` を並べる。空なら節ごと出さない。
 /// `### title` 配下へ `- item` を並べる。`## Rules` / `## Brand` の小節用。空なら出さない。
 fn render_sublist(out: &mut String, title: &str, items: &[String]) {
     if items.is_empty() {
@@ -523,6 +359,7 @@ const BRAND_TRIGGERS: &[&str] = &[
 /// 一致ゼロ・全て注入済みなら None (素通り)。照合は大文字小文字を無視した部分一致。
 pub fn policy_injection(
     canon: &Canon,
+    phase: Phase,
     text: &str,
     already: &std::collections::HashSet<String>,
     force_rules: bool,
@@ -532,8 +369,8 @@ pub fn policy_injection(
     let mut keys = Vec::new();
 
     let want_rules = force_rules || RULES_TRIGGERS.iter().any(|k| lower.contains(k));
-    if want_rules && !already.contains(RULES_KEY) && has_rules(&canon.rules) {
-        out.push_str(&render_rules_block(&canon.rules));
+    if want_rules && !already.contains(RULES_KEY) && has_rules_for_phase(&canon.rules, phase) {
+        out.push_str(&render_rules_block_for_phase(&canon.rules, phase));
         keys.push(RULES_KEY.to_string());
     }
 
@@ -584,7 +421,29 @@ pub fn pre_tool_use_decision(
     tool_name: &str,
     command: Option<&str>,
     irreversible: &[Irreversible],
+    bulk_delete_threshold: usize,
 ) -> HookDecision {
+    // apply_patch の一括削除ガード。Bash 判定より先に処理する。
+    // threshold が 0 なら無効 (チェックしない)。
+    if tool_name == "apply_patch" {
+        if let Some(patch) = command
+            && bulk_delete_threshold > 0
+        {
+            let delete_count = parse_patch_changes(patch)
+                .into_iter()
+                .filter(|c| c.op == PatchOp::Delete)
+                .count();
+            if delete_count >= bulk_delete_threshold {
+                return HookDecision::Deny {
+                    reason: format!(
+                        "This apply_patch deletes {delete_count} files at once, which is irreversible. If this is intended, delete fewer files per patch, or record a decision with decision.record listing them under authorizes and have a human approve it with gate.approve before retrying."
+                    ),
+                };
+            }
+        }
+        return HookDecision::Allow;
+    }
+
     if tool_name != "Bash" {
         return HookDecision::Allow;
     }
@@ -880,7 +739,7 @@ fn rm_targets(command: &str) -> Vec<String> {
 /// 拾うのはリダイレクト (`>` `>>` の連結/分離・`2>` `&>` 等)・`tee`・`sed -i`・`cp`/`mv` の宛先・`dd of=`。
 /// 完全な shell 解析はしない (近似)。過剰に拾っても層 glob に当たらなければ無害なので、取りこぼしより
 /// 過剰側へ倒す。`rm`/`git rm` の削除は `rm_targets` が別に拾う。
-fn write_targets(command: &str) -> Vec<String> {
+pub fn write_targets(command: &str) -> Vec<String> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut targets = Vec::new();
     let mut i = 0;
@@ -1108,15 +967,17 @@ pub enum StopDecision {
 
 /// Stop 時の決定。
 ///
-/// 完了前に verify・判断記録を促す (誘導)。`stop_hook_active` (既に継続済み) なら
-/// 受理してループを避ける。継続は 1 ターンにつき高々 1 回。
+/// 完了検証を機械強制する。変更があるターンの終わりに検査結果 (`verify`) を見て、失敗なら継続させ
+/// 修正へ向ける (verify.run を促すだけで AI 任せにしない)。`stop_hook_active` (既に継続済み) なら
+/// 受理してループを避ける。継続・ブロックは 1 ターンにつき高々 1 回。直せない検査 (既存失敗・flaky)
+/// で AI がスタックしトークンを浪費するのを防ぐ。直らないまま停止しても commit ゲート (`commit_gate`)
+/// が最終防壁として commit を block するので、壊れたコードは確定しない
+/// (`docs/decisions/20260627-判断2軸と対話kickoff.md` の行動軸権威化と整合)。
 ///
 /// `dirty` は作業ツリーに verify 対象の変更があるか (.owox 配下は除外して呼び出し側が判定)。
-/// `verify_rearmed` は前回 checklist を促してから verify.run が走ったか (まだ一度も促していない時も
-/// 真。呼び出し側が「前回促した時の verify 署名」と今の verify 署名を比べて判定)。未検証の変更が
-/// 続く 1 つのエピソードでは checklist を高々 1 回だけ出し、その後の連続編集では黙る。verify.run が
-/// 走ると次の未検証エピソードとして再武装し、また高々 1 回促す。これで編集が進むたび毎ターン催促
-/// される過多を断つ (合否強制は commit ゲートが担うので促しは礼儀に留める)。
+/// `verify` は検査結果 (呼び出し側が直前 verify.run / commit の署名キャッシュを再利用、無ければフレッシュ
+/// 実行)。`verify_fresh` はこの Stop で初めてこのツリーを検証したか (キャッシュ再利用でない)。新規に
+/// 検証が通った瞬間だけ判断記録を一度促し、同じ内容の連続停止では黙る (毎ターンの催促を避ける)。
 ///
 /// `open_gates` は未承認 gate の数。`gates_changed` は前回促した時から未承認 gate の顔ぶれが
 /// 変わったか (呼び出し側が open 来歴 ID の署名で判定)。open gate も「変わった時だけ」一度表面化する。
@@ -1124,52 +985,58 @@ pub enum StopDecision {
 /// (狼少年化を避ける。保守 phase の commit ゲートが別途 open gate を block するので機械強制は不変)。
 /// クリーン かつ 促す変化が無いなら何もすることが無いので素通りする
 /// (`docs/handoff/20260613-Phase4対話検証で見つけた粗の改善.md`)。
-///
-/// stop は毎ターン末に発火するため検査の再実行はしない (重い)。機械強制の完了検証は
-/// commit ゲート (`commit_gate`) が担う。stop は変更の確認促しと未解決 gate の表面化に絞る。
-///
-/// `verified_current` は今の作業ツリーが直前の verify.run と同一内容か (呼び出し側が署名で判定)。
-/// true なら既に検証済みで以降変更が無いので verify を促す checklist を出さない。合否は問わない
-/// (Stop は走らせたかの誘導で、合否強制は commit ゲートが担う)。これで verify.run 後に未コミットの
-/// 変更が残るだけで毎ターン催促されるノイズを避ける。
 pub fn stop_decision(
     stop_hook_active: bool,
+    dirty: bool,
+    verify: &VerifyOutcome,
+    verify_fresh: bool,
     open_gates: usize,
     gates_changed: bool,
-    dirty: bool,
-    verified_current: bool,
-    verify_rearmed: bool,
 ) -> StopDecision {
-    if stop_hook_active {
-        return StopDecision::Accept;
+    // 検査失敗は壊れたまま停止させない。継続させ修正へ向ける。1 ターン高々 1 回 (継続済みは見送り)。
+    if !stop_hook_active
+        && dirty
+        && let VerifyOutcome::Failed { failed } = verify
+    {
+        return StopDecision::Continue {
+            reason: stop_verify_failed_reason(failed),
+        };
     }
-    // 未検証の変更があり、かつ前回促してから verify.run が走った (= 新しい未検証エピソード) 時だけ
-    // checklist を出す。同じ未検証エピソードの連続編集では再び促さず、毎ターンの催促を避ける。
-    let want_checklist = dirty && !verified_current && verify_rearmed;
-    // 未承認 gate も顔ぶれが変わった時だけ表面化する (毎ターンの蒸し返しを避ける)。
-    let want_gates = open_gates > 0 && gates_changed;
-    // 促す変化が無い (新規変更なし・gate の顔ぶれも不変) なら黙って終わる。
-    if !want_checklist && !want_gates {
+    if stop_hook_active {
         return StopDecision::Accept;
     }
 
     let mut parts: Vec<String> = Vec::new();
-    if want_checklist {
-        parts.push(STOP_CHECKLIST.to_string());
+    // 新規に検査が通った (or 検査未設定の) 瞬間だけ判断記録を一度促す。再利用 (= 既に見た内容) は黙る。
+    if dirty && verify_fresh && !matches!(verify, VerifyOutcome::Failed { .. }) {
+        parts.push(STOP_RECORD_NUDGE.to_string());
     }
-    if want_gates {
+    // 未承認 gate も顔ぶれが変わった時だけ表面化する (毎ターンの蒸し返しを避ける)。
+    if open_gates > 0 && gates_changed {
         parts.push(format!(
             "{open_gates} decision(s) are still open and awaiting human judgment; call the next tool to see them."
         ));
     }
-    StopDecision::Continue {
-        reason: parts.join(" "),
+    if parts.is_empty() {
+        StopDecision::Accept
+    } else {
+        StopDecision::Continue {
+            reason: parts.join(" "),
+        }
     }
 }
 
-/// 変更があるターンの完了前チェックリスト。継続プロンプトとして AI へ渡す。
+/// 検査失敗で停止を保留する時の継続プロンプト。失敗した検査名を添えて修正へ向ける。
+fn stop_verify_failed_reason(failed: &[String]) -> String {
+    format!(
+        "Verification failed, so this turn is held instead of finishing. Failing checks: {}. Fix the code (or the checks) — verify runs automatically again when you stop, and the commit gate blocks commits until they pass.",
+        failed.join(", ")
+    )
+}
+
+/// 検査が通ったターンの完了前リマインド。継続プロンプトとして AI へ渡す。
 /// 一時的・作業状態は decision でなく task.note へ逃がすよう誘導する (来歴の乱立を防ぐ)。
-const STOP_CHECKLIST: &str = "Before finishing this turn: run verify.run for the code you changed, and record only durable design or direction decisions with decision.record — use task.note for transient working memos. If you have already done this, you may stop.";
+const STOP_RECORD_NUDGE: &str = "Checks pass. Record only durable design or direction decisions with decision.record — use task.note for transient working memos. Then you may stop.";
 
 #[cfg(test)]
 mod tests {
@@ -1185,7 +1052,7 @@ mod tests {
         matches!(d, HookDecision::Allow)
     }
     fn decide(tool_name: &str, command: Option<&str>) -> HookDecision {
-        pre_tool_use_decision(tool_name, command, &[])
+        pre_tool_use_decision(tool_name, command, &[], 3)
     }
 
     #[test]
@@ -1210,6 +1077,87 @@ mod tests {
     #[test]
     fn non_bash_allows() {
         assert!(is_allow(&decide("apply_patch", None)));
+    }
+
+    /// apply_patch のファイル削除が閾値以上なら deny。
+    #[test]
+    fn apply_patch_bulk_delete_at_threshold_denies() {
+        let patch = "*** Begin Patch\n*** Delete File: a.rs\n*** Delete File: b.rs\n*** Delete File: c.rs\n*** End Patch\n";
+        // threshold=3、削除 3 件 → deny。
+        let d = pre_tool_use_decision("apply_patch", Some(patch), &[], 3);
+        assert!(is_deny(&d));
+        if let HookDecision::Deny { reason } = d {
+            assert!(
+                reason.contains("3 files"),
+                "reason should mention count: {reason}"
+            );
+            assert!(
+                reason.contains("decision.record"),
+                "reason should mention decision.record: {reason}"
+            );
+        }
+    }
+
+    /// apply_patch のファイル削除が閾値未満なら allow。
+    #[test]
+    fn apply_patch_bulk_delete_below_threshold_allows() {
+        let patch =
+            "*** Begin Patch\n*** Delete File: a.rs\n*** Delete File: b.rs\n*** End Patch\n";
+        // threshold=3、削除 2 件 → allow。
+        assert!(is_allow(&pre_tool_use_decision(
+            "apply_patch",
+            Some(patch),
+            &[],
+            3
+        )));
+    }
+
+    /// apply_patch で削除が無ければ (Add/Update のみ) allow。
+    #[test]
+    fn apply_patch_no_deletes_allows() {
+        let patch = "*** Begin Patch\n*** Add File: x.rs\n*** Update File: y.rs\n*** End Patch\n";
+        assert!(is_allow(&pre_tool_use_decision(
+            "apply_patch",
+            Some(patch),
+            &[],
+            3
+        )));
+    }
+
+    /// apply_patch 以外の非 Bash ツールは allow。
+    #[test]
+    fn non_bash_non_apply_patch_allows() {
+        assert!(is_allow(&pre_tool_use_decision(
+            "Edit",
+            Some("file.rs"),
+            &[],
+            3
+        )));
+        assert!(is_allow(&pre_tool_use_decision(
+            "Write",
+            Some("file.rs"),
+            &[],
+            3
+        )));
+        assert!(is_allow(&pre_tool_use_decision(
+            "Read",
+            Some("file.rs"),
+            &[],
+            3
+        )));
+    }
+
+    /// threshold=0 は一括削除ガードを無効にする。
+    #[test]
+    fn apply_patch_threshold_zero_disables_guard() {
+        let patch = "*** Begin Patch\n*** Delete File: a.rs\n*** Delete File: b.rs\n*** Delete File: c.rs\n*** Delete File: d.rs\n*** Delete File: e.rs\n*** End Patch\n";
+        // threshold=0 は無効 → allow。
+        assert!(is_allow(&pre_tool_use_decision(
+            "apply_patch",
+            Some(patch),
+            &[],
+            0
+        )));
     }
 
     #[test]
@@ -1656,53 +1604,48 @@ mod tests {
         Quality::from_toml(toml).unwrap()
     }
 
+    fn failed(checks: &[&str]) -> VerifyOutcome {
+        VerifyOutcome::Failed {
+            failed: checks.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     #[test]
-    fn stop_continues_once_then_accepts() {
-        // 未検証の変更があり再武装済みなら 1 度継続、既継続なら受理。
+    fn stop_blocks_on_failed_checks_then_accepts_once_continued() {
+        // 変更があり検査が失敗したら継続させ修正へ向ける。既継続なら受理してループを避ける。
+        match stop_decision(false, true, &failed(&["cargo test"]), true, 0, false) {
+            StopDecision::Continue { reason } => assert!(reason.contains("cargo test"), "{reason}"),
+            _ => panic!("failed checks should block"),
+        }
         assert!(matches!(
-            stop_decision(false, 0, false, true, false, true),
-            StopDecision::Continue { .. }
-        ));
-        assert!(matches!(
-            stop_decision(true, 0, false, true, false, true),
+            stop_decision(true, true, &failed(&["cargo test"]), true, 0, false),
             StopDecision::Accept
         ));
     }
 
     #[test]
-    fn stop_accepts_when_dirty_but_not_rearmed() {
-        // dirty でも前回促してから verify.run が走っていなければ (再武装なし) 黙る。
-        // 同じ未検証エピソードの連続編集で毎ターン催促しない。
+    fn stop_nudges_record_once_when_checks_freshly_pass() {
+        // 新規に検査が通った瞬間だけ判断記録を一度促す。
         assert!(matches!(
-            stop_decision(false, 0, false, true, false, false),
-            StopDecision::Accept
-        ));
-    }
-
-    #[test]
-    fn stop_continues_again_after_verify_rearms() {
-        // verify.run が走り再武装されたら、次の未検証編集でまた高々 1 回促す。
-        assert!(matches!(
-            stop_decision(false, 0, false, true, false, true),
+            stop_decision(false, true, &VerifyOutcome::Passed, true, 0, false),
             StopDecision::Continue { .. }
         ));
     }
 
     #[test]
-    fn stop_accepts_when_verified_current_even_if_rearmed() {
-        // 直前に verify.run を走らせた内容のままなら checklist を出さない
-        // (verify.run 済み・以降変更なし。合否は問わない)。
+    fn stop_accepts_when_pass_is_reused() {
+        // 同じ内容を再検証 (キャッシュ再利用) して通った時は黙る。毎ターンの催促を避ける。
         assert!(matches!(
-            stop_decision(false, 0, false, true, true, true),
+            stop_decision(false, true, &VerifyOutcome::Passed, false, 0, false),
             StopDecision::Accept
         ));
     }
 
     #[test]
-    fn stop_surfaces_gates_even_when_verified_current() {
-        // verify 済みで checklist を抑えても、未決 gate の顔ぶれが変われば別途表面化する。
+    fn stop_surfaces_gates_even_when_checks_pass() {
+        // 検査が通って record 促しを抑えても、未決 gate の顔ぶれが変われば別途表面化する。
         assert!(matches!(
-            stop_decision(false, 2, true, true, true, true),
+            stop_decision(false, true, &VerifyOutcome::Passed, false, 2, true),
             StopDecision::Continue { .. }
         ));
     }
@@ -1711,7 +1654,7 @@ mod tests {
     fn stop_accepts_when_clean_and_no_open_gates() {
         // 変更なし・未決なしなら黙って終わる (ノイズを出さない)。
         assert!(matches!(
-            stop_decision(false, 0, false, false, false, false),
+            stop_decision(false, false, &VerifyOutcome::NoChecks, false, 0, false),
             StopDecision::Accept
         ));
     }
@@ -1720,7 +1663,7 @@ mod tests {
     fn stop_mentions_open_gates_when_changed() {
         // クリーンでも未決 gate の顔ぶれが変わった時は一度表面化する。
         if let StopDecision::Continue { reason } =
-            stop_decision(false, 3, true, false, false, false)
+            stop_decision(false, false, &VerifyOutcome::NoChecks, false, 3, true)
         {
             assert!(reason.contains('3'));
         } else {
@@ -1732,7 +1675,16 @@ mod tests {
     fn stop_accepts_when_open_gates_unchanged() {
         // 同じ未決 gate が続く間は黙る (人間待ちを毎ターン蒸し返さない)。
         assert!(matches!(
-            stop_decision(false, 3, false, false, false, false),
+            stop_decision(false, false, &VerifyOutcome::NoChecks, false, 3, false),
+            StopDecision::Accept
+        ));
+    }
+
+    #[test]
+    fn stop_does_not_nudge_record_when_checks_fail_but_already_continued() {
+        // 既継続で検査失敗のままなら受理 (1 ターン高々 1 回。直せない検査でのスタックを防ぐ)。
+        assert!(matches!(
+            stop_decision(true, true, &failed(&["x"]), true, 0, false),
             StopDecision::Accept
         ));
     }
@@ -1790,12 +1742,10 @@ mod tests {
         assert!(out.contains("regression test"));
     }
 
-    /// 肥大化時の自動降格: 上限超過で glossary 用語名一覧を出さず、practices は新しい順に上位だけ。
+    /// glossary / practices は床へ一覧しない。lookup 導線だけ残す。
     #[test]
-    fn floor_demotes_glossary_and_practices_over_limit() {
+    fn floor_omits_glossary_and_practices() {
         let mut canon = canon_with_glossary(&[("a", "da"), ("b", "db"), ("c", "dc")]);
-        canon.settings.context.glossary_floor_max = 2;
-        canon.settings.context.practices_floor_max = 1;
         canon.practices = crate::model::Practices {
             entries: vec![
                 crate::model::Practice {
@@ -1807,117 +1757,114 @@ mod tests {
                     text: "newest practice".into(),
                 },
             ],
+            rule_entries: vec![],
         };
         let out = floor_context(&canon);
-        // glossary: 一覧を出さず lookup へ寄せる。
-        assert!(out.contains("3 glossary terms"));
+        assert!(!out.contains("## Glossary terms"));
         assert!(!out.contains("\n- a\n"));
-        // practices: 新しい順に上位1件 + lookup 案内。
-        assert!(out.contains("newest practice"));
-        assert!(!out.contains("oldest practice"));
+        assert!(!out.contains("## Practices"));
+        assert!(!out.contains("newest practice"));
+        assert!(out.contains("glossary.lookup"));
         assert!(out.contains("practice.lookup"));
     }
 
-    /// 上限以下なら従来どおり全列挙する。
+    /// 用語が少なくても床へ一覧しない。
     #[test]
-    fn floor_lists_all_under_limit() {
+    fn floor_never_lists_glossary_terms() {
         let out = floor_context(&canon_with_glossary(&[("alpha", "d")]));
-        assert!(out.contains("\n- alpha\n"));
+        assert!(!out.contains("\n- alpha\n"));
     }
 
-    /// 床に向き付けと意図ルーティングが入る (AGENTS.md 廃止の代替・曖昧リクエスト対応の要)。
+    /// 床は canon 禁止と entry map だけを残す。
     #[test]
-    fn floor_carries_orientation_and_routing() {
+    fn floor_carries_canon_rule_and_entry_map() {
         let out = floor_context(&canon_with_glossary(&[]));
-        // 向き付け: canon 直読み/編集禁止。
         assert!(out.contains("Do not read or edit the canon"));
-        // 意図ルーティング: tool 名を言わなくても飛べる対応表。
-        assert!(out.contains("Acting on what the human asks"));
-        assert!(out.contains("canon.propose"));
-        assert!(out.contains("rules.lookup"));
-        assert!(out.contains("review.lenses for the pruning perspective"));
-        // 調査結果は knowledge.add へ向ける (practices と区別)。
-        assert!(out.contains("knowledge.add"));
-        // 注入文に括弧補足を入れない。
-        assert!(!out.contains(" ("));
+        assert!(out.contains("## Entry map"));
+        assert!(out.contains("Use kickoff to orient"));
+        assert!(out.contains("Use next to see the intent gate"));
+        assert!(out.contains("Use context to find what to read"));
+        assert!(out.contains("Use verify before finishing"));
+        assert!(out.contains("Use review to inspect changes"));
+        assert!(out.contains("Use skill to grow or manage skills"));
+        assert!(out.contains("rules.lookup, glossary.lookup, and practice.lookup"));
     }
 
-    /// 要件ルーティングは prfaq の時だけ PRFAQ 起草を直書きし、ideal-first の時だけ優先度を人間へ向ける。
+    /// 床は Vision を残し、それ以外の長い常設一覧を落とす。
     #[test]
-    fn requirement_routing_adapts_to_nature() {
-        use crate::profile::{Axes, Prioritization, RequirementsShape};
-        // 既定 (prfaq + ideal-first) は PRFAQ 起草と優先度文を出す。
-        let out = render_requirement_routing(Some(&Axes::default()));
-        assert!(out.contains("press release"));
-        assert!(out.contains("Leave the priority ranking to a human"));
-        assert!(out.contains("functional or non-functional"));
-        assert!(!out.contains(" ("));
-        // lightweight + incremental はどちらも出さず、req スキル誘導と種類分類だけ残す。
-        let lite = Axes {
-            requirements_shape: RequirementsShape::Lightweight,
-            prioritization: Prioritization::Incremental,
-            ..Axes::default()
-        };
-        let out2 = render_requirement_routing(Some(&lite));
-        assert!(!out2.contains("press release"));
-        assert!(!out2.contains("Leave the priority ranking"));
-        assert!(out2.contains("use the req skill"));
-        assert!(out2.contains("functional or non-functional"));
-    }
-
-    /// 床は rules 本文と brand リストを載せない (オンデマンドへ寄せた)。Vision と全体スタイルは残す。
-    #[test]
-    fn floor_omits_rules_and_brand_lists_keeps_style() {
+    fn floor_omits_rules_brand_lists_and_style() {
         let mut canon = canon_with_glossary(&[]);
         canon.brand.style = vec!["short sentences".to_string()];
         canon.brand.values = vec!["clarity".to_string()];
         canon.rules.change_policy = vec!["match existing style".to_string()];
         let out = floor_context(&canon);
         assert!(out.contains("## Vision"));
-        assert!(out.contains("## Style"));
-        assert!(out.contains("short sentences"));
-        // rules 本文・brand リストは床に出さない。
         assert!(!out.contains("## Rules"));
         assert!(!out.contains("match existing style"));
         assert!(!out.contains("## Values"));
         assert!(!out.contains("clarity"));
+        assert!(!out.contains("## Style"));
+        assert!(!out.contains("short sentences"));
     }
 
-    /// 成長層 (practices) が session 開始でライブ注入される。
+    /// practices は lookup 導線だけを残し、本文を床へ出さない。
     #[test]
-    fn session_start_injects_practices() {
+    fn floor_points_to_practice_lookup_without_listing_practices() {
         let mut canon = canon_with_glossary(&[]);
         canon.practices = crate::model::Practices {
             entries: vec![crate::model::Practice {
                 date: "20260614".to_string(),
                 text: "always add a regression test".to_string(),
             }],
+            rule_entries: vec![],
         };
         let out = floor_context(&canon);
-        assert!(out.contains("## Practices"));
-        assert!(out.contains("always add a regression test"));
+        assert!(out.contains("practice.lookup"));
+        assert!(!out.contains("## Practices"));
+        assert!(!out.contains("always add a regression test"));
+    }
+
+    /// テスト用: entries に 1 つのエントリを追加するヘルパ。
+    fn push_rule_entry(rules: &mut crate::model::Rules, section: &str, text: &str) {
+        rules.entries.push(crate::model::RuleEntry {
+            phase: None,
+            section: section.to_string(),
+            triggers: Vec::new(),
+            operations: Vec::new(),
+            paths: Vec::new(),
+            text: text.to_string(),
+        });
     }
 
     /// policy_injection: rules 語が出たら `## Rules` 本文を push し、出ていなければ素通り。
     #[test]
     fn policy_injects_rules_on_trigger_word() {
         let mut canon = canon_with_glossary(&[]);
-        canon.rules.deletion_policy = vec!["keep history".to_string()];
+        push_rule_entry(&mut canon.rules, "Deletion policy", "keep history");
         // 「delete」で rules を push。
-        let inj = policy_injection(&canon, "can I delete this file?", &none_set(), false).unwrap();
+        let inj = policy_injection(
+            &canon,
+            Phase::Initial,
+            "can I delete this file?",
+            &none_set(),
+            false,
+        )
+        .unwrap();
         assert!(inj.context.contains("## Rules"));
         assert!(inj.context.contains("keep history"));
         assert_eq!(inj.keys, vec!["policy:rules".to_string()]);
         // 無関係なプロンプトでは出さない。
-        assert!(policy_injection(&canon, "run the tests", &none_set(), false).is_none());
+        assert!(
+            policy_injection(&canon, Phase::Initial, "run the tests", &none_set(), false).is_none()
+        );
     }
 
     /// policy_injection: force_rules=true なら語に関わらず rules を届ける (編集直前の経路)。
     #[test]
     fn policy_force_rules_injects_without_word() {
         let mut canon = canon_with_glossary(&[]);
-        canon.rules.safety = vec!["no secrets in logs".to_string()];
-        let inj = policy_injection(&canon, "", &none_set(), true).unwrap();
+        push_rule_entry(&mut canon.rules, "Safety", "no secrets in logs");
+        let inj = policy_injection(&canon, Phase::Initial, "", &none_set(), true).unwrap();
         assert!(inj.context.contains("no secrets in logs"));
     }
 
@@ -1925,10 +1872,12 @@ mod tests {
     #[test]
     fn policy_skips_already_injected() {
         let mut canon = canon_with_glossary(&[]);
-        canon.rules.change_policy = vec!["small diffs".to_string()];
+        push_rule_entry(&mut canon.rules, "Change policy", "small diffs");
         let already: std::collections::HashSet<String> =
             ["policy:rules".to_string()].into_iter().collect();
-        assert!(policy_injection(&canon, "change the rule", &already, true).is_none());
+        assert!(
+            policy_injection(&canon, Phase::Initial, "change the rule", &already, true).is_none()
+        );
     }
 
     /// policy_injection: brand 語で brand リストを push。Vision・全体スタイルは含めない。
@@ -1937,8 +1886,14 @@ mod tests {
         let mut canon = canon_with_glossary(&[]);
         canon.brand.values = vec!["honesty".to_string()];
         canon.brand.style = vec!["short sentences".to_string()];
-        let inj =
-            policy_injection(&canon, "what are the project values?", &none_set(), false).unwrap();
+        let inj = policy_injection(
+            &canon,
+            Phase::Initial,
+            "what are the project values?",
+            &none_set(),
+            false,
+        )
+        .unwrap();
         assert!(inj.context.contains("## Brand"));
         assert!(inj.context.contains("honesty"));
         // 全体スタイルは床に常時なので brand ブロックへ重複させない。
@@ -2005,8 +1960,8 @@ mod tests {
     fn session_context_points_to_tools_not_resources() {
         // 読みは tool 一本化。owox:// resource でなく context/next tool へ誘導する。
         let out = floor_context(&canon_with_glossary(&[]));
-        assert!(out.contains("the context tool"));
-        assert!(out.contains("the next tool"));
+        assert!(out.contains("Use context to find what to read"));
+        assert!(out.contains("Use next to see the intent gate"));
         assert!(!out.contains("owox://"));
     }
 
@@ -2025,56 +1980,79 @@ mod tests {
         assert!(!out.contains("Response language"));
     }
 
-    fn skill_fixture(name: &str, promoted: bool) -> Skill {
-        Skill {
-            id: name.to_string(),
-            name: name.to_string(),
-            description: format!("when {name} fits"),
-            skill_md: String::new(),
-            implicit: true,
-            promoted,
-            human_gate: false,
-            tests: Vec::new(),
-            scripts: Vec::new(),
-        }
-    }
-
+    /// オーケストレーション節は床から外す。
     #[test]
-    fn skills_section_empty_when_no_skills() {
-        // 育てたスキルが無い時は床へ何も足さない (膨らみ防止)。
-        assert!(render_skills_section(&[]).is_empty());
-    }
-
-    #[test]
-    fn skills_section_lists_and_tags_promoted() {
-        let skills = vec![skill_fixture("tidy", false), skill_fixture("release", true)];
-        let out = render_skills_section(&skills);
-        assert!(out.contains("## Skills you can use"));
-        // 登録のみは素名・昇格は [promoted] タグ付き。
-        assert!(out.contains("- tidy — when tidy fits"));
-        assert!(out.contains("- release [promoted] — when release fits"));
-        // 着手前に該当を能動的に使う促し。
-        assert!(out.contains("Before you design or implement"));
-    }
-
-    /// 床にオーケストレーション節が注入される。
-    #[test]
-    fn floor_carries_orchestration_section() {
+    fn floor_omits_orchestration_section() {
         let out = floor_context(&canon_with_glossary(&[]));
-        // 節見出し。
-        assert!(out.contains("## Orchestration"), "section heading missing");
-        // 役割名 (canon のデフォルト5役割)。
-        assert!(out.contains("investigate"), "investigate role missing");
-        assert!(out.contains("implement"), "implement role missing");
-        // handoff の .owox 経由とサブエージェントの差し戻し。
-        assert!(out.contains(".owox"), "handoff via .owox not mentioned");
+        assert!(!out.contains("## Orchestration"));
+        assert!(!out.contains("investigate"));
+        assert!(!out.contains("adversarial"));
+    }
+
+    /// policy_injection は現在 phase のエントリのみ出す。他 phase のエントリは漏れない。
+    #[test]
+    fn policy_injection_filters_to_current_phase() {
+        let mut canon = canon_with_glossary(&[]);
+        // Initial phase のエントリ
+        canon.rules.entries.push(crate::model::RuleEntry {
+            phase: Some(Phase::Initial),
+            section: "Initial only".to_string(),
+            triggers: Vec::new(),
+            operations: Vec::new(),
+            paths: Vec::new(),
+            text: "initial-phase-rule".to_string(),
+        });
+        // Stable phase のエントリ
+        canon.rules.entries.push(crate::model::RuleEntry {
+            phase: Some(Phase::Stable),
+            section: "Stable only".to_string(),
+            triggers: Vec::new(),
+            operations: Vec::new(),
+            paths: Vec::new(),
+            text: "stable-phase-rule".to_string(),
+        });
+
+        // force_rules=true で Initial を要求
+        let inj = policy_injection(&canon, Phase::Initial, "", &none_set(), true).unwrap();
         assert!(
-            out.contains("hand it back to a human"),
-            "parent handback not mentioned"
+            inj.context.contains("initial-phase-rule"),
+            "Initial rule は出るはず: {}",
+            inj.context
         );
-        // 変種 (adversarial)。
-        assert!(out.contains("adversarial"), "adversarial variant missing");
-        // 括弧補足を含まない (床文体の原則・memory 方針)。
-        assert!(!out.contains(" ("), "parenthetical found in floor context");
+        assert!(
+            !inj.context.contains("stable-phase-rule"),
+            "Stable rule は漏れないはず: {}",
+            inj.context
+        );
+    }
+
+    /// entry_map_tools はコマンド入口ツール 6 件を含み、
+    /// バックストップ lookup ツール 3 件を含まない。
+    #[test]
+    fn entry_map_tools_excludes_backstop_lookups() {
+        let tools = entry_map_tools();
+
+        // バックストップ lookup ツールは含まれてはならない。
+        assert!(
+            !tools.contains(&"rules.lookup"),
+            "rules.lookup は entry_map_tools に含まれてはならない"
+        );
+        assert!(
+            !tools.contains(&"glossary.lookup"),
+            "glossary.lookup は entry_map_tools に含まれてはならない"
+        );
+        assert!(
+            !tools.contains(&"practice.lookup"),
+            "practice.lookup は entry_map_tools に含まれてはならない"
+        );
+
+        // コマンド入口ツール 6 件はすべて含まれている必要がある。
+        for expected in &["kickoff", "next", "context", "verify", "review", "skill"] {
+            assert!(
+                tools.contains(expected),
+                "{} は entry_map_tools に含まれていなければならない",
+                expected
+            );
+        }
     }
 }

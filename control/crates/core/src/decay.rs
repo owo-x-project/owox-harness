@@ -248,6 +248,87 @@ pub fn run_practice_redundancy(
     findings
 }
 
+/// rules の冗長性を検出する。
+///
+/// rules の全フィールドを平坦化した String スライスに対して、practice と同じ字 n-gram (3-gram)
+/// Jaccard 類似度を使い、閾値超えを kind="duplicate-rule" として報告する。
+/// 新たな類似アルゴリズムは発明せず、run_practice_redundancy と同じ char_ngrams / jaccard を流用。
+/// is_structural()=false なので commit を止めない (advisory)。
+pub fn run_rules_redundancy(rules: &crate::model::Rules, min_similarity: f64) -> Vec<DecayFinding> {
+    // 全フィールドを平坦化して (テキスト, セクション名) ペアにする。
+    // irreversible / human_gate は構造が異なるため対象外。
+    let entries: Vec<(&str, &str)> = rules
+        .common
+        .iter()
+        .map(|s| (s.as_str(), "common"))
+        .chain(rules.initial.iter().map(|s| (s.as_str(), "initial")))
+        .chain(rules.stable.iter().map(|s| (s.as_str(), "stable")))
+        .chain(
+            rules
+                .maintenance
+                .iter()
+                .map(|s| (s.as_str(), "maintenance")),
+        )
+        .chain(
+            rules
+                .change_policy
+                .iter()
+                .map(|s| (s.as_str(), "change_policy")),
+        )
+        .chain(
+            rules
+                .dependency_policy
+                .iter()
+                .map(|s| (s.as_str(), "dependency_policy")),
+        )
+        .chain(
+            rules
+                .deletion_policy
+                .iter()
+                .map(|s| (s.as_str(), "deletion_policy")),
+        )
+        .chain(rules.safety.iter().map(|s| (s.as_str(), "safety")))
+        .collect();
+
+    let grams: Vec<std::collections::BTreeSet<String>> = entries
+        .iter()
+        .map(|(text, _)| char_ngrams(text, 3))
+        .collect();
+    let mut findings = Vec::new();
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let sim = jaccard(&grams[i], &grams[j]);
+            if sim >= min_similarity {
+                findings.push(DecayFinding {
+                    kind: "duplicate-rule",
+                    subject: format!("rule [{}/{}]", entries[j].1, short_rule(entries[j].0)),
+                    detail: format!(
+                        "looks {}% similar to rule [{}/{}]; consider merging via canon.propose",
+                        (sim * 100.0).round() as u32,
+                        entries[i].1,
+                        short_rule(entries[i].0)
+                    ),
+                });
+            }
+        }
+    }
+    findings
+}
+
+/// rules の subject 用短縮 (先頭 40 文字)。
+fn short_rule(text: &str) -> &str {
+    if text.len() <= 40 {
+        text
+    } else {
+        // UTF-8 境界に合わせる。
+        let mut end = 40;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+}
+
 /// テキストの字 n-gram 集合。短すぎる時は全体を 1 要素にする (言語非依存)。
 fn char_ngrams(text: &str, n: usize) -> std::collections::BTreeSet<String> {
     let chars: Vec<char> = text.trim().chars().collect();
@@ -338,6 +419,33 @@ pub fn run_branch_memory_decay(
                 subject: m.branch.clone(),
                 detail: format!("no notes for {} days", td - last),
             });
+        }
+    }
+    findings
+}
+
+/// 検証設定の陳腐化を検出する。
+///
+/// 各検査が `evidence_paths` に宣言したファイル (work_dir 相対) が実在しない場合、
+/// kind="stale-verify-link" として報告する。is_structural()=false なので commit を止めない (advisory)。
+/// `evidence_paths` が空の検査はスキップする (宣言なし = 陳腐化判定なし)。決定論的 (与えた順)。
+pub fn detect_stale_verify_links(
+    checks: &[crate::model::VerifyCheck],
+    work_dir: &Path,
+) -> Vec<DecayFinding> {
+    let mut findings = Vec::new();
+    for check in checks {
+        for path in &check.evidence_paths {
+            if !work_dir.join(path).exists() {
+                findings.push(DecayFinding {
+                    kind: "stale-verify-link",
+                    subject: check.name.clone(),
+                    detail: format!(
+                        "evidence path {} for check {} no longer exists",
+                        path, check.name
+                    ),
+                });
+            }
         }
     }
     findings
@@ -539,6 +647,7 @@ mod tests {
             id: id.to_string(),
             title: "d".to_string(),
             status,
+            kind: None,
             rationale: String::new(),
             links: DecisionLinks::default(),
             supersedes: Vec::new(),
@@ -901,10 +1010,12 @@ mod tests {
                 crate::model::VerifyCheck {
                     name: "dead code".to_string(),
                     command: "exit 1".to_string(), // decay 有り (非ゼロ)
+                    evidence_paths: Vec::new(),
                 },
                 crate::model::VerifyCheck {
                     name: "clean".to_string(),
                     command: "true".to_string(), // decay 無し (通過)
+                    evidence_paths: Vec::new(),
                 },
             ],
             ..DecayConfig::default()
@@ -951,6 +1062,48 @@ mod tests {
         }];
         // existing が空 (git を読めない) なら孤児判定を飛ばす (誤検出しない)。
         let f = run_branch_memory_decay(&mems, &[], 30, "20260618");
+        assert!(f.is_empty());
+    }
+
+    // --- detect_stale_verify_links ---
+
+    fn verify_check(name: &str, paths: Vec<&str>) -> crate::model::VerifyCheck {
+        crate::model::VerifyCheck {
+            name: name.to_string(),
+            command: "true".to_string(),
+            evidence_paths: paths.into_iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn stale_verify_link_missing_path_flagged() {
+        let dir = tempdir();
+        // "report.txt" は作成しない → missing。
+        let checks = vec![verify_check("ci-report", vec!["report.txt"])];
+        let f = detect_stale_verify_links(&checks, &dir);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "stale-verify-link");
+        assert_eq!(f[0].subject, "ci-report");
+        assert!(f[0].detail.contains("report.txt"));
+        assert!(f[0].detail.contains("ci-report"));
+        // 陳腐化リンクは advisory (commit を止めない)。
+        assert!(!f[0].is_structural());
+    }
+
+    #[test]
+    fn stale_verify_link_existing_path_clean() {
+        let dir = tempdir();
+        write(&dir, "proof.txt", "ok");
+        let checks = vec![verify_check("my-check", vec!["proof.txt"])];
+        let f = detect_stale_verify_links(&checks, &dir);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn stale_verify_link_empty_evidence_paths_yields_none() {
+        let dir = tempdir();
+        let checks = vec![verify_check("no-evidence", vec![])];
+        let f = detect_stale_verify_links(&checks, &dir);
         assert!(f.is_empty());
     }
 }

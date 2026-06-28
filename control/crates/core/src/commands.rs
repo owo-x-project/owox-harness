@@ -116,31 +116,55 @@ fn parse_commands_toml(text: &str) -> Result<Vec<Command>, String> {
         .collect())
 }
 
+/// 曖昧な要望を質問で具体化する共通指針 (grill-me)。kickoff / req / design が共有する。
+///
+/// 一度に1問・コードで分かる事は自己解決・質問種別で形を変える (`docs/decisions/20260611-方向付け.md`,
+/// `docs/decisions/20260627-判断2軸と対話kickoff.md`)。提示は `{{QUESTION_TOOL}}` プレースホルダで持ち、
+/// target 生成時に各 CLI の質問ツール名へ写像する (`crate::target::apply_question_tool`)。判断型は
+/// 推奨案を先頭の選択肢にする。正本は CLI 名を入れない (生成文はツール非依存)。
+const GRILL_GUIDANCE: &str = "Grill one point at a time to make vague intent concrete; resolve what the code already shows yourself first (context scope codebase, or scope diff when a change is in flight) and only ask what the code cannot answer. Shape each point by its kind: for an elicit point ask an open question and paste no recommendation; for a confirm point state the decision owox already made and let the human only override it; for a judge point give the recommendation, the reason, and the options. Present each point to the human {{QUESTION_TOOL}}, and for a judge point make the recommended option the first choice. When an answer stays vague, ask one sharp follow-up before moving on.";
+
 /// owox 標準コマンド (第1段階)。本文は owox 機能識別子だけを指し、CLI 名を入れない。
 ///
 /// 本文は 1 つの owox tool を命令形で呼び、ファイル直読みや代替手順を禁じる
 /// (散文の指示はモデルが別経路へ逸れる。`docs/decisions/20260613-Phase5-実機検証の是正.md`)。
 fn standard_commands() -> Vec<Command> {
+    // 質問で具体化する入口 (kickoff / req / design) は grill-me 指針を共有する。
+    let mut commands = vec![
+        Command {
+            name: "kickoff".to_string(),
+            description: "Start kickoff and surface the next setup point.".to_string(),
+            body: format!(
+                "Call kickoff, then call next. {GRILL_GUIDANCE} Hold product intent and safety for the human; decide and write action-axis setup yourself (project nature, indexes, setup files) without asking. Do the action owox proceeds with; do not ask the human about it. Do not read the canon files yourself."
+            ),
+        },
+        Command {
+            name: "req".to_string(),
+            description: "Draft or refine requirements the way the project's nature calls for."
+                .to_string(),
+            body: format!(
+                "Draft or refine requirements with the requirement tools. First call profile.get to see the active requirements-shape. {GRILL_GUIDANCE} If prfaq, think through the requirement as a short press release (who benefits and how) plus the key questions, and get human approval on what and why before building; if lightweight, capture a brief statement and acceptance criteria directly. Do not write the requirement until the intent is concrete. The requirement itself is the canonical record: distill what you drafted into requirement.create and requirement.add_criterion, each criterion with a verification link, rather than keeping a separate press-release document. Record the why and the benefit as a decision and link it. Tag each requirement's kind as functional or non-functional; keep technical and design constraints as decisions, not requirements. If prioritization is ideal-first, leave the priority ranking to a human. Do not read or edit requirement files under .owox/ directly."
+            ),
+        },
+        Command {
+            name: "design".to_string(),
+            description: "Work out a design decision before implementing.".to_string(),
+            body: format!(
+                "Shape a design decision before writing code. First understand the structure (context scope codebase, and scope diff when a change is in flight). {GRILL_GUIDANCE} Design choices are tradeoffs: weigh options against responsibility boundaries, dependency direction, extensibility, and cleanliness, and prefer the future-proof and clean option even when it costs more now. Hold genuine product-intent or safety forks for the human; owox may settle reversible technical tradeoffs itself. Record the chosen design and why, plus the rejected alternatives and revisit conditions, with decision.record using kind \"design\", and link it to the requirement it serves. Enforceable structural constraints (dependency direction, layer boundaries) belong in quality.toml, not prose. Keep design and technical constraints as decisions, not requirements. Do not read the canon files yourself."
+            ),
+        },
+    ];
+
     let defs: &[(&str, &str, &str)] = &[
         (
-            "kickoff",
-            "Orient at the start of a session before deciding what to do.",
-            "Call the kickoff tool, then the next tool and the context tool. State the project's Vision, current phase, and nature, then propose the next concrete step. Before you start designing or implementing, check which of the project's practices and grown skills fit the task and use them. The kickoff tool bundles orientation: if no nature is set yet it returns a detected draft to propose to the human and set with profile.set after they confirm; for a brand-new project ask the human which named bundle fits and set it with profile.set. If you are adopting owox into an existing codebase, the kickoff tool also returns draft guardrails such as layers, boundaries, and irreversible operations — propose them to the human before adding any with canon.add. Do not read the canon files yourself; these tools return what you need.",
-        ),
-        (
-            "req",
-            "Draft or refine requirements the way the project's nature calls for.",
-            "Draft or refine requirements with the requirement tools. First call profile.get to see the active requirements-shape: if prfaq, think through the requirement as a short press release (who benefits and how) plus the key questions, and get human approval on what and why before building; if lightweight, capture a brief statement and acceptance criteria directly. Either way the requirement itself is the canonical record: distill what you drafted into requirement.create and requirement.add_criterion, each criterion with a verification link, rather than keeping a separate press-release document. Record the why and the benefit as a decision and link it. Tag each requirement's kind as functional or non-functional; keep technical and design constraints as decisions, not requirements. If prioritization is ideal-first, leave the priority ranking to a human. Do not read or edit requirement files under .owox/ directly.",
-        ),
-        (
             "next",
-            "See what to decide next and which tasks are ready.",
-            "Call the next tool and report the open decisions to resolve and the tasks that are ready to start. Do not read the canon files yourself; the next tool returns this.",
+            "See the intent gate and the action owox proceeds with.",
+            "Call next. It splits into the human's intent gate (open decisions and prioritization the human decides) and the action owox proceeds with (shown last). Present the gate to the human; carry out the action owox proceeds with yourself without asking. If you need what changed, call context with scope diff. If you need a repo map before choosing files, call context with scope codebase. Do not read the canon files yourself.",
         ),
         (
             "status",
-            "Summarize where the project stands now.",
-            "Summarize the current state. Call the next tool for open decisions and ready tasks, and list pending human gates with gate.list. Do not read the canon files yourself.",
+            "Summarize current state and blockers.",
+            "Call next, then gate.list. Call verify.run too when the current check state matters. Do not read the canon files yourself.",
         ),
         (
             "decide",
@@ -149,18 +173,18 @@ fn standard_commands() -> Vec<Command> {
         ),
         (
             "verify",
-            "Check completion before finishing work.",
-            "Call verify.run and report completion in three kinds: work, requirement, and verification. Do not run the project's check scripts yourself; verify.run runs them and records the result.",
+            "Check completion before finishing.",
+            "Call verify.run and report work, requirement, and verification completion from that result. Do not run the project's checks yourself.",
         ),
         (
             "review",
-            "Review a change from several angles.",
-            "Review the current change. First call review.lenses to get the perspectives that apply to it, and call verify.run to take in what machines already checked; do not re-judge what verification, the quality bars, or the requirement trace already report. Then review through each applicable perspective in turn: correctness, design, security, alignment with existing conventions and assets, requirements, and unnecessary leftovers to prune. For each finding, confirm it against the actual code, then try to refute it from another angle and keep only what survives. Treat pruning as a proposal: never delete blindly, route any removal through the deletion policy and re-run verify.run, and send irreversible deletions to a human.",
+            "Review a change with the right lenses.",
+            "Call review.lenses, then verify.run, then context with scope diff. If structure is still unclear, call context with scope codebase. Review only what survives both confirmation and re-checking. Treat pruning as a proposal, not a blind delete.",
         ),
         (
             "task",
             "Manage work as verifiable tasks.",
-            "Manage work with the task tools: list ready work with task.list, create new work with task.create, and finish work with task.close, which requires verification to pass.",
+            "Manage work with the task tools: list ready work with task.list, create new work with task.create, and finish work with task.close, which requires verification to pass. If the area to touch is unclear before starting, call context with scope codebase.",
         ),
         (
             "issues",
@@ -170,21 +194,25 @@ fn standard_commands() -> Vec<Command> {
         (
             "skill",
             "Grow and manage reusable skills.",
-            "Manage reusable skills with the skill tools: list them and their test and stage status with skill.list, register a draft with skill.register, promote a registered skill with skill.promote only after a human approves, and append a lesson with skill.remember. Author skill files under .owox/skills/. Do not create or register skills through other means.",
+            "Call skill.list first. When a repeated local routine is deterministic, testable, and secret-free, route it through skill.register and skill.promote; treat it as a script-oriented skill. Record lessons with skill.remember.",
+        ),
+        (
+            "memo",
+            "Save a note to the right existing place by its content.",
+            "Save the note where it belongs; do not invent a new place. Classify by content: a durable judgment that must not be silently reversed goes to decision.record; the current task's working state goes to task.note; state that only matters on this branch goes to branch.note; a fact learned from investigation goes to knowledge.add; a lesson about a skill goes to skill.remember; a message meant for the next whole session goes through handoff. If the right place is unclear, ask the human which one before saving.",
         ),
         (
             "handoff",
             "Summarize state for the next session.",
-            "Produce a concise handoff: what changed, what is verified, the open decisions from the next tool, and the next step for the following session.",
+            "Produce a concise handoff for the following session. Call next for open gates, ready tasks, and stale items, verify.run for the current check state, context with scope diff for what changed, and branch.notes for branch-local notes. Summarize what changed, what is verified, the open decisions, ready tasks, branch notes, stale items, and the next step. Do not read the canon files yourself.",
         ),
     ];
-    defs.iter()
-        .map(|(name, description, body)| Command {
-            name: name.to_string(),
-            description: description.to_string(),
-            body: body.to_string(),
-        })
-        .collect()
+    commands.extend(defs.iter().map(|(name, description, body)| Command {
+        name: name.to_string(),
+        description: description.to_string(),
+        body: body.to_string(),
+    }));
+    commands
 }
 
 #[cfg(test)]
@@ -208,9 +236,73 @@ mod tests {
         let names: Vec<_> = standard_commands().into_iter().map(|c| c.name).collect();
         for expected in [
             "kickoff", "next", "status", "decide", "verify", "review", "task", "skill", "handoff",
-            "req",
+            "req", "memo", "design",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn intent_eliciting_commands_carry_grill_guidance() {
+        // 曖昧な要望を具体化する入口は grill-me 指針を持ち、質問提示プレースホルダ (target 生成で
+        // 質問ツール名へ写像) と判断型の推奨先頭を指示する。正本に CLI 固有ツール名は入れない。
+        let commands = standard_commands();
+        for name in ["kickoff", "req", "design"] {
+            let cmd = commands.iter().find(|c| c.name == name).unwrap();
+            assert!(
+                cmd.body.contains(crate::target::QUESTION_TOOL_PLACEHOLDER),
+                "{name} が質問提示プレースホルダを欠く"
+            );
+            assert!(
+                cmd.body.contains("recommended option the first choice"),
+                "{name} が判断型の推奨先頭指示を欠く"
+            );
+            assert!(
+                cmd.body.contains("one point at a time"),
+                "{name} が一度に1問の指針を欠く"
+            );
+            assert!(
+                !cmd.body.to_lowercase().contains("askuserquestion"),
+                "{name} の正本に CLI 固有ツール名が混入"
+            );
+        }
+    }
+
+    #[test]
+    fn grill_guidance_embeds_the_placeholder() {
+        // 指針本体とプレースホルダ定数の同期を守る (片方だけ変えても気づけるように)。
+        assert!(GRILL_GUIDANCE.contains(crate::target::QUESTION_TOOL_PLACEHOLDER));
+    }
+
+    #[test]
+    fn memo_routes_to_existing_stores_without_new_store() {
+        // 「メモして」の唯一の分類役。新ストアを作らず既存 5 保存先 + handoff へ振る。
+        let memo = standard_commands()
+            .into_iter()
+            .find(|c| c.name == "memo")
+            .expect("memo command");
+        for store in [
+            "decision.record",
+            "task.note",
+            "branch.note",
+            "knowledge.add",
+            "skill.remember",
+        ] {
+            assert!(memo.body.contains(store), "memo が {store} へ振らない");
+        }
+        // 分類不能時は人間へ確認する。
+        assert!(memo.body.contains("ask the human"));
+    }
+
+    #[test]
+    fn handoff_pulls_from_live_sources() {
+        // 引き継ぎは会話ログでなく live ソースから組む (`docs/.../memo-伝言メモ不要.md`)。
+        let handoff = standard_commands()
+            .into_iter()
+            .find(|c| c.name == "handoff")
+            .expect("handoff command");
+        for src in ["next", "verify.run", "scope diff", "branch.notes"] {
+            assert!(handoff.body.contains(src), "handoff が {src} を使わない");
         }
     }
 

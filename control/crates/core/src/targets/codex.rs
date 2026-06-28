@@ -55,7 +55,8 @@ impl Target for CodexTarget {
             let base = format!(".agents/skills/{}", skill.id);
             files.push(GeneratedFile {
                 path: format!("{base}/SKILL.md"),
-                contents: skill.skill_md.clone(),
+                // 質問提示プレースホルダを写像する。Codex は構造化質問ツールを持たないので平文へ倒す。
+                contents: crate::target::apply_question_tool(&skill.skill_md, self.question_tool()),
                 executable: false,
                 write: Write::Overwrite,
             });
@@ -141,7 +142,7 @@ args = ["serve"]
 /// - PreToolUse (Bash/apply_patch/Edit/Write): Bash の不可逆操作を deny・git commit に完了確認、
 ///   編集対象の内容に出た用語の定義と change/safety policy を push
 /// - UserPromptSubmit (matcher 非対応): プロンプトに出た用語の定義と rules/brand を能動 push
-/// - Stop (matcher 無し): 完了前に verify・判断記録を促す
+/// - Stop (matcher 無し): 変更があれば検査を自動実行し、失敗なら block して修正へ向ける (通れば判断記録を促す)
 fn render_hooks_json() -> String {
     // 薄いテンプレート。手書き JSON で依存を増やさない。整形は固定。
     r#"{
@@ -212,6 +213,24 @@ mod tests {
         let md = files.iter().find(|f| f.path.ends_with("SKILL.md")).unwrap();
         // SKILL.md は横断標準の文面を verbatim で出す。
         assert!(md.contents.contains("name: tidy"));
+    }
+
+    #[test]
+    fn skill_maps_question_tool_placeholder_to_plain_text() {
+        // Codex は構造化質問ツールを持たないので、プレースホルダは平文へ倒れる。
+        let mut s = skill("kickoff", false, false, Vec::new());
+        s.skill_md = format!(
+            "---\nname: kickoff\ndescription: d\n---\n\nPresent each point {} now.\n",
+            crate::target::QUESTION_TOOL_PLACEHOLDER
+        );
+        let files = CodexTarget.generate_skills(&[s]);
+        let md = files.iter().find(|f| f.path.ends_with("SKILL.md")).unwrap();
+        assert!(md.contents.contains("plain text"), "{}", md.contents);
+        assert!(!md.contents.contains("AskUserQuestion"));
+        assert!(
+            !md.contents
+                .contains(crate::target::QUESTION_TOOL_PLACEHOLDER)
+        );
     }
 
     #[test]

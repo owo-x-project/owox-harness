@@ -22,7 +22,7 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 
 ### 配布 (owox-harness 自身)
 
-- 配置: モノレポ root (`/workspace/product`) の `.github/workflows/release.yml`。tag は `owox-v*` で owox-harness 配布を他成果物から分離。ビルドは `control/` から
+- 配置: モノレポ root (`/workspace/product`) の `.github/workflows/release.yml`。main の `control/.owox-version` 変更で起動し、値は `owox-v<version>` 形式。ビルドは `control/` から
 - ビルド対象4種 (すべて native runner でクロスビルドを避ける)
     - x86_64-unknown-linux-musl
     - aarch64-unknown-linux-gnu
@@ -33,7 +33,7 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 - 導入スクリプト
     - setup.sh: unix (linux / macOS) 用。OS と CPU を判定 → 対応成果物と SHA256SUMS を取得 → checksum 照合 → 実行ファイルを導入先へ配置。導入先は既定 `~/.local/bin`・環境変数で変更可
     - install.ps1: Windows 用。同手順を PowerShell で
-- 版: workspace 共通 version を `0.1.0` から開始。owox に `--version` / `-V` を追加し導入物の版を確認可能に
+- 版: `.owox-version` を配布版の唯一真実源にする。workflow が `owox-v` を外した値を workspace version へ注入し、Release tag と `owox --version` を追従させる。通常ビルドの workspace version は `0.1.0`
 - linux x86_64 は `musl` 静的リンクを採用。理由は Debian 12 相当 (`glibc 2.36`) で `GLIBC_2.39 not found` が出たため
 
 ### release.toml (対象プロジェクト向け任意正本)
@@ -51,7 +51,7 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 - native runner 4種はクロスビルドの罠 (リンカ・sysroot) を避け、保守が軽い。GitHub は linux arm runner を公開済みで aarch64-linux も native で組める
 - linux x86_64 を `musl` へ寄せると、導入先の `glibc` 版差分をほぼ消せる。今回の不具合 (`GLIBC_2.39` 要求) へ直接効く
 - 1つの SHA256SUMS は setup.sh の照合を単純化し、成果物追加でスクリプトを増やさない
-- tag prefix `owox-v*` はモノレポの既存 tag (`v1`) と衝突せず、owox-harness 配布を独立して切れる
+- `.owox-version` 起点にすると、main に入った版だけが配布され、Release tag と成果物内の版がずれない。tag prefix `owox-v*` はモノレポの既存 tag (`v1`) と衝突せず、owox-harness 配布を独立して切れる
 - 導入先既定 `~/.local/bin` は sudo 不要で個人開発者 (第一対象) に素直
 - release.toml の検査委譲は、owox が hash 計算の新依存を抱えず、対象プロジェクトの実情 (cosign / minisign / sha256sum) に合わせられる。版の取り出しだけ正規表現で owox が担う (regex は既存依存)
 - owox 自身の配布も対象プロジェクトの release.toml も「成果物の完全性を確かめる」で揃う。安全性を要件領域に持つ製品として一貫する
@@ -83,4 +83,4 @@ owox-harness 自身の配布と、対象プロジェクトの配布支援 (relea
 ## 未決事項
 
 - release.check の実機検証 (対象プロジェクトでの dist 照合)
-- GitHub Releases への実 tag push による workflow の実走確認 (人間関与)
+- main の `.owox-version` 変更 merge による workflow の実走確認 (人間関与)

@@ -4,7 +4,7 @@
 //! SessionStart / PostCompact hook が live 注入する。rules 本文と brand リストはオンデマンド注入。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use owox_core::{
     HookDecision, find, floor_context, load_canon, policy_injection, pre_tool_use_decision,
@@ -18,18 +18,6 @@ fn fixtures() -> PathBuf {
 
 fn fixture_owox() -> PathBuf {
     fixtures().join("minimal/.owox")
-}
-
-/// 指定 owox から生成し、目的のファイル内容を返す。無ければ空文字。
-fn generated(owox: &Path, path: &str) -> String {
-    let canon = load_canon(owox).expect("正本を読める");
-    find("codex")
-        .expect("codex target")
-        .generate(&canon)
-        .into_iter()
-        .find(|f| f.path == path)
-        .map(|f| f.contents)
-        .unwrap_or_default()
 }
 
 #[test]
@@ -100,11 +88,12 @@ fn floor_carries_orientation_routing_and_vision() {
     let canon = load_canon(&fixture_owox()).expect("正本を読める");
     let floor = floor_context(&canon);
 
-    // 向き付けと意図ルーティング (AGENTS.md 廃止の代替・曖昧リクエスト対応の要)。
+    // 薄い床: canon 禁止と entry map。
     assert!(floor.contains("Do not read or edit the canon"));
-    assert!(floor.contains("Acting on what the human asks"));
-    assert!(floor.contains("canon.propose"));
-    assert!(floor.contains("rules.lookup"));
+    assert!(floor.contains("## Entry map"));
+    assert!(floor.contains("Use kickoff to orient"));
+    assert!(floor.contains("Use next to see the intent gate"));
+    assert!(floor.contains("rules.lookup, glossary.lookup, and practice.lookup"));
     // Vision は床に常時。
     assert!(floor.contains("## Vision"));
     assert!(floor.contains(&canon.brand.vision));
@@ -119,16 +108,14 @@ fn floor_carries_orientation_routing_and_vision() {
 }
 
 #[test]
-fn floor_omits_rules_and_brand_lists_keeps_style() {
+fn floor_omits_rules_brand_lists_and_style() {
     let owox = fixtures().join("withrules/.owox");
     let canon = load_canon(&owox).expect("正本を読める");
     let floor = floor_context(&canon);
 
-    // 全体スタイルは床に常時。
-    assert!(floor.contains("## Style"));
-    assert!(floor.contains("Prefer short, plain sentences"));
-
-    // rules 本文は床に出さない (オンデマンド注入と rules.lookup へ寄せた)。
+    // rules 本文と style 一覧は床に出さない。
+    assert!(!floor.contains("## Style"));
+    assert!(!floor.contains("Prefer short, plain sentences"));
     assert!(!floor.contains("## Rules"));
     assert!(!floor.contains("## Change policy"));
     assert!(!floor.contains("Match the existing style"));
@@ -161,14 +148,29 @@ fn rules_block_renders_on_demand_without_detect() {
 fn prompt_word_pushes_rules_block() {
     // ユーザーが tool 名や「rules」を言わなくても、関連語で本文が届く。
     let canon = load_canon(&fixtures().join("withrules/.owox")).expect("正本を読める");
-    let inj = policy_injection(&canon, "can I delete this file?", &HashSet::new(), false)
-        .expect("delete で rules を push");
+    let inj = policy_injection(
+        &canon,
+        canon.state.phase,
+        "can I delete this file?",
+        &HashSet::new(),
+        false,
+    )
+    .expect("delete で rules を push");
     assert!(inj.context.contains("## Rules"));
     assert!(inj.context.contains("Generated artifacts may be deleted"));
     assert_eq!(inj.keys, vec!["policy:rules".to_string()]);
 
     // 無関係なプロンプトでは押し付けない (最小コンテキスト)。
-    assert!(policy_injection(&canon, "just say hello", &HashSet::new(), false).is_none());
+    assert!(
+        policy_injection(
+            &canon,
+            canon.state.phase,
+            "just say hello",
+            &HashSet::new(),
+            false
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -187,6 +189,7 @@ fn target_irreversible_detect_denies() {
         "Bash",
         Some("terraform destroy -auto-approve"),
         &canon.rules.irreversible,
+        3,
     );
     assert!(matches!(decision, HookDecision::Deny { .. }));
 }
@@ -195,11 +198,10 @@ fn target_irreversible_detect_denies() {
 fn floor_injects_glossary_term_names() {
     let canon = load_canon(&fixtures().join("withrules/.owox")).expect("正本を読める");
     let floor = floor_context(&canon);
-    // 用語名は床に live で届く。
-    assert!(floor.contains("## Glossary terms"));
-    assert!(floor.contains("- canon"));
+    // 用語一覧は出さず lookup 導線だけ残す。
+    assert!(!floor.contains("## Glossary terms"));
+    assert!(!floor.contains("- canon"));
     assert!(floor.contains("glossary.lookup"));
-    // 定義本体は注入しない (出現時 push と lookup で取る)。
     assert!(!floor.contains("the source of truth"));
 }
 

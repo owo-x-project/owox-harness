@@ -114,11 +114,10 @@ fn push_block(buf: &mut String, block: &str) {
     buf.push_str(block);
 }
 
-/// UserPromptSubmit。プロンプトに現れた用語定義と、rules/brand 関連語に応じた本文を能動 push する。
+/// UserPromptSubmit。プロンプトに現れた用語定義だけを能動 push する。
 ///
-/// 用語名は床コンテキストに常時。意味が要る時にこの hook が定義を push する。さらに rules/policy/
-/// delete 等の語が出たら `## Rules` を、brand 関連語が出たら brand リストを届ける (段階的開示)。
-/// モデルが探しに行く前・ユーザーが tool 名を言わなくても届くので最小コンテキストで効く。
+/// 用語名は床コンテキストに常時。意味が要る時にこの hook が定義を push する。
+/// rules / practices は語彙推定でなく、実際の操作と path で出す。ここでは扱わない。
 /// 一致が無い・正本が読めない時は素通り (作業を妨げない)。session 内の既出は除く。
 fn user_prompt_submit() -> ExitCode {
     let input = read_input();
@@ -126,6 +125,18 @@ fn user_prompt_submit() -> ExitCode {
     if prompt.is_empty() {
         return ExitCode::SUCCESS;
     }
+    let prompt_hits = owox_core::extract_term_hits(
+        &[owox_core::GlossaryScanText {
+            path: "user prompt".to_string(),
+            text: prompt.to_string(),
+        }],
+        "user prompt",
+    );
+    crate::cache::remember_glossary_hits(
+        &owox_dir(input.cwd.as_deref()),
+        input.session_id.as_deref(),
+        &prompt_hits,
+    );
 
     let Some(canon) = load_canon_from(input.cwd.as_deref()) else {
         return ExitCode::SUCCESS;
@@ -137,10 +148,6 @@ fn user_prompt_submit() -> ExitCode {
     if let Some(inj) = owox_core::glossary_injection(&canon, prompt, &already) {
         push_block(&mut context, &inj.context);
         keys.extend(inj.terms);
-    }
-    if let Some(inj) = owox_core::policy_injection(&canon, prompt, &already, false) {
-        push_block(&mut context, &inj.context);
-        keys.extend(inj.keys);
     }
 
     // 訂正検知 (決定論シグナル)。AI が編集した後で人間が新たに発話し、作業ツリーに変更が残る時、
@@ -181,6 +188,11 @@ fn is_edit_tool(tool_name: &str) -> bool {
     matches!(tool_name, "apply_patch" | "Edit" | "Write" | "MultiEdit")
 }
 
+/// 読取前用語走査の対象。
+fn is_read_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "Read" | "Open")
+}
+
 /// PreToolUse。
 ///
 /// 1. 不可逆操作なら deny で止める (機械強制。最優先)
@@ -190,18 +202,25 @@ fn pre_tool_use() -> ExitCode {
     let input = read_input();
     let tool_name = input.tool_name.as_deref().unwrap_or_default();
     let command = input.tool_input.as_ref().and_then(|t| t.command.as_deref());
+    let file_path = input
+        .tool_input
+        .as_ref()
+        .and_then(|t| t.file_path.as_deref());
 
-    // 使用履歴: シェル操作・編集の tool 名を 1 行追記する (best-effort)。
+    // 使用履歴: 読み・編集・シェル操作を安全な分類で 1 行追記する (best-effort)。
     // 入口コマンド (MCP tool) は serve 側の call_tool で記録するのでここでは拾わない (二重計上回避)。
-    if matches!(
-        tool_name,
-        "Bash" | "apply_patch" | "Edit" | "Write" | "MultiEdit"
-    ) {
-        owox_core::usage::record(
-            &owox_dir(input.cwd.as_deref()),
-            &crate::clock::today_utc(),
-            tool_name,
-        );
+    let usage_dir = owox_dir(input.cwd.as_deref());
+    let today = crate::clock::today_utc();
+    if tool_name == "Bash" {
+        if let Some(command) = command {
+            owox_core::usage::record_shell(&usage_dir, &today, command);
+        } else {
+            owox_core::usage::record(&usage_dir, &today, "Bash");
+        }
+    } else if is_edit_tool(tool_name) {
+        owox_core::usage::record(&usage_dir, &today, "Edit");
+    } else if is_read_tool(tool_name) {
+        owox_core::usage::record(&usage_dir, &today, "Read");
     }
 
     // AI がファイルを編集した印を session へ残す。次の人間プロンプトで訂正検知 nudge の土台にする。
@@ -218,10 +237,29 @@ fn pre_tool_use() -> ExitCode {
         .unwrap_or_default();
 
     // 不可逆操作は最優先で deny (機械強制)。
+    let bulk_delete_threshold = canon
+        .as_ref()
+        .map(|c| c.quality.bulk_delete_threshold())
+        .unwrap_or(3);
     if let owox_core::HookDecision::Deny { reason } =
-        owox_core::pre_tool_use_decision(tool_name, command, irreversible)
+        owox_core::pre_tool_use_decision(tool_name, command, irreversible, bulk_delete_threshold)
     {
         return deny_pre_tool_use(reason);
+    }
+
+    if is_read_tool(tool_name)
+        && let Some(path) = file_path
+        && reads_canon_path(path)
+    {
+        return deny_pre_tool_use(
+            "Do not read the project canon under .owox/ directly. Its guidance reaches you through the session context and the owox tools; look up a glossary term with glossary.lookup, and to change or remove canon use canon.propose. You may read and write skills under .owox/skills/.".to_string(),
+        );
+    }
+
+    if edits_rules_file(&input) {
+        return deny_pre_tool_use(
+            "Do not edit .owox/rules.md directly. Rules and their delivery triggers are fixed canon. Add with canon.add, and change or remove with canon.propose so a human approves it.".to_string(),
+        );
     }
 
     // 層別自律度の操作前ゲート。architecture=layered の時だけ効く。guarded 層の削除・契約面編集を
@@ -232,10 +270,6 @@ fn pre_tool_use() -> ExitCode {
             .resolve()
             .map(|a| a.layered_active())
             .unwrap_or(false);
-        let file_path = input
-            .tool_input
-            .as_ref()
-            .and_then(|t| t.file_path.as_deref());
         let work_dir = input
             .cwd
             .as_deref()
@@ -272,28 +306,43 @@ fn pre_tool_use() -> ExitCode {
     }
 
     let mut context = String::new();
-
-    // 編集直前: change/deletion/safety policy を一度届け (force_rules)、編集対象の内容に出た用語
-    // 定義と brand 関連語の本文も push する (段階的開示)。session 内の既出区分・用語は除く。
-    // 用語定義は内容がある時だけ、rules は内容が無くても届ける (編集という行為が合図)。
-    if is_edit_tool(tool_name)
-        && let Some(canon) = canon.as_ref()
-    {
+    // 読取前: 対象ファイルの先頭だけ軽く読み、出た用語の定義だけ届ける。
+    // 操作前: operation/path に応じた rules / practices を届ける。
+    if let Some(canon) = canon.as_ref() {
         let already = read_injected_terms(input.cwd.as_deref(), input.session_id.as_deref());
-        let content = command.unwrap_or("");
-        let mut keys: Vec<String> = Vec::new();
-        if !content.is_empty()
-            && let Some(inj) = owox_core::glossary_injection(canon, content, &already)
-        {
-            push_block(&mut context, &inj.context);
-            keys.extend(inj.terms);
+        let mut terms: Vec<String> = Vec::new();
+        let scan_texts = glossary_scan_texts(&input);
+        if !scan_texts.is_empty() {
+            let hits = owox_core::extract_term_hits(&scan_texts, "read scan");
+            crate::cache::remember_glossary_hits(
+                &owox_dir(input.cwd.as_deref()),
+                input.session_id.as_deref(),
+                &hits,
+            );
+            let content = scan_texts
+                .iter()
+                .map(|text| text.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(inj) = owox_core::glossary_injection(canon, &content, &already) {
+                push_block(&mut context, &inj.context);
+                terms.extend(inj.terms);
+            }
         }
-        if let Some(inj) = owox_core::policy_injection(canon, content, &already, true) {
-            push_block(&mut context, &inj.context);
-            keys.extend(inj.keys);
+        let delivery_paths = pre_tool_use_delivery_paths(&input);
+        let delivery_ops = pre_tool_use_delivery_operations(&input, &delivery_paths);
+        if let Ok(selection) = owox_core::select_delivery_for_phase(
+            &owox_dir(input.cwd.as_deref()),
+            owox_core::DeliveryRequest::for_operations(&delivery_ops, &delivery_paths),
+            canon.state.phase,
+        ) {
+            let block = owox_core::render_delivery_block(&selection);
+            if !block.is_empty() {
+                push_block(&mut context, &block);
+            }
         }
-        if !keys.is_empty() {
-            remember_terms(input.cwd.as_deref(), input.session_id.as_deref(), &keys);
+        if !terms.is_empty() {
+            remember_terms(input.cwd.as_deref(), input.session_id.as_deref(), &terms);
         }
     }
 
@@ -316,40 +365,9 @@ fn commit_gate_decision(cwd: Option<&str>, canon: Option<&owox_core::Canon>) -> 
     };
 
     let work_dir = cwd.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    // 直前 verify.run と作業ツリーが同一なら、その検査結果を再利用する。一致しない・記録が無い時は
-    // フレッシュに検査を走らせる。
-    let cached = crate::cache::read_verify_record(&owox_dir(cwd));
-    let current_sig = crate::files::tree_signature(&work_dir);
-    let reuse = match (&cached, &current_sig) {
-        (Some(rec), Some(sig)) => (rec.signature == *sig).then_some(rec),
-        _ => None,
-    };
-    let outcome = match reuse {
-        // needs_human = 検査未設定 (verify.rs の判定と整合)。
-        Some(rec) => match rec.verification.as_str() {
-            "passed" => owox_core::VerifyOutcome::Passed,
-            "failed" => owox_core::VerifyOutcome::Failed {
-                failed: rec.failed.clone(),
-            },
-            _ => owox_core::VerifyOutcome::NoChecks,
-        },
-        None => {
-            let results = owox_core::run_checks(&work_dir, &canon.verify.checks);
-            if canon.verify.checks.is_empty() {
-                owox_core::VerifyOutcome::NoChecks
-            } else if results.iter().all(|r| r.passed) {
-                owox_core::VerifyOutcome::Passed
-            } else {
-                owox_core::VerifyOutcome::Failed {
-                    failed: results
-                        .iter()
-                        .filter(|r| !r.passed)
-                        .map(|r| r.name.clone())
-                        .collect(),
-                }
-            }
-        }
-    };
+    // 直前 verify.run / Stop と作業ツリーが同一なら検査結果を再利用、無ければフレッシュ実行して記録する
+    // (Stop と共用。署名一致 = 同一結果で二重実行を避ける)。
+    let (outcome, _fresh) = cached_verify_outcome(&owox_dir(cwd), &work_dir, canon);
 
     let open_gates = count_open_gates(cwd);
 
@@ -495,88 +513,139 @@ fn remind_pre_tool_use(message: String) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Stop。完了前に verify・判断記録を促す。継続は 1 ターンに高々 1 回。
+/// Stop。完了検証を機械強制する。変更があるターンの終わりに検査を自動実行し、失敗なら継続させ
+/// 修正へ向ける (verify.run を促すだけで AI 任せにしない。`docs/decisions/20260627-判断2軸と対話kickoff.md`)。
+/// 検査は直前 verify.run / commit と作業ツリーが同一なら記録を再利用し、無ければフレッシュ実行して
+/// 記録する (二重実行を避ける)。ブロック・継続は 1 ターン高々 1 回 (直せない検査でのスタックを防ぐ)。
 /// 作業ツリーがクリーン かつ 未決 gate ゼロ なら黙って終わる (ノイズを出さない)。
 fn stop() -> ExitCode {
     let input = read_input();
-    let open_ids = open_gate_ids(input.cwd.as_deref());
+    let cwd = input.cwd.as_deref();
+    let owox = owox_dir(cwd);
+    let work_dir = cwd.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let dirty = working_tree_dirty(cwd);
+    let open_ids = open_gate_ids(cwd);
     let open_gates = open_ids.len();
-    let dirty = working_tree_dirty(input.cwd.as_deref());
-    let work_dir = input.cwd.as_deref().unwrap_or(".");
-    // 作業ツリーの署名。直前 verify.run の署名と突き合わせ「検証済みで以降変更なし」を見る。
-    let signature = if dirty {
-        crate::files::tree_signature(Path::new(work_dir))
-    } else {
-        None
-    };
-    // 直前に verify.run を走らせた時の作業ツリー署名 (無ければ None)。
-    let verify_sig = crate::cache::read_verify_signature(&owox_dir(input.cwd.as_deref()));
-
-    // 今が直前 verify.run の内容と同一か。一致なら verify を促す checklist を出さない (合否は問わない。
-    // Stop は走らせたかの誘導で、合否強制は commit ゲートが担う)。署名を取れない時は未検証扱いへ倒す。
-    let verified_current = match (&signature, &verify_sig) {
-        (Some(sig), Some(v)) => sig == v,
-        _ => false,
-    };
-
-    // 再武装判定。前回 checklist を促した時に覚えた verify 署名と今の verify 署名を比べ、変われば
-    // (= 前回促してから verify.run が走った) 再武装する。未促しなら覚えが無く再武装扱い。これで
-    // 1 つの未検証エピソードでは高々 1 回だけ促し、編集が進むだけの毎ターンの催促を断つ。
-    let marked = read_stop_verify_marker(input.cwd.as_deref(), input.session_id.as_deref());
-    let verify_sig_str = verify_sig.as_deref().unwrap_or("");
-    let verify_rearmed = match &marked {
-        None => true,
-        Some(prev) => prev != verify_sig_str,
-    };
-    // checklist を促す条件 (core と同じ)。促した時だけ今の verify 署名を覚えて再武装を閉じる。
-    let want_checklist = dirty && !verified_current && verify_rearmed;
 
     // 未承認 gate の顔ぶれ署名 (open 来歴 ID を整列して連結)。前回促した時から変わったかを見る。
     // 同じ顔ぶれが続く間は黙り、人間待ちのゲートを毎ターン蒸し返さない。
     let gate_signature = (open_gates > 0).then(|| open_ids.join(","));
-    let last_gates = read_gate_signature(input.cwd.as_deref(), input.session_id.as_deref());
+    let last_gates = read_gate_signature(cwd, input.session_id.as_deref());
     let gates_changed = open_gates > 0 && gate_signature != last_gates;
+
+    // 変更があれば検査を機械検証する。正本を読めない時は検証を諦め gate だけ見る (作業を妨げない)。
+    let (verify, verify_fresh) = if dirty {
+        match owox_core::load_canon(&owox) {
+            Ok(canon) => cached_verify_outcome(&owox, &work_dir, &canon),
+            Err(_) => (owox_core::VerifyOutcome::NoChecks, false),
+        }
+    } else {
+        (owox_core::VerifyOutcome::NoChecks, false)
+    };
+
+    // 検査失敗で停止を保留 (ブロック) する局面か。この時は gate を表面化しないので gate 署名も覚えない。
+    let verify_blocking = dirty
+        && !input.stop_hook_active
+        && matches!(verify, owox_core::VerifyOutcome::Failed { .. });
 
     match owox_core::stop_decision(
         input.stop_hook_active,
+        dirty,
+        &verify,
+        verify_fresh,
         open_gates,
         gates_changed,
-        dirty,
-        verified_current,
-        verify_rearmed,
     ) {
         // 受理: 出力無しで終了 (素通り)。
         owox_core::StopDecision::Accept => ExitCode::SUCCESS,
         owox_core::StopDecision::Continue { reason } => {
-            // checklist を促したなら今の verify 署名を覚え、verify.run が走るまで再び促さない。
-            if want_checklist {
-                remember_stop_verify_marker(
-                    input.cwd.as_deref(),
-                    input.session_id.as_deref(),
-                    verify_sig_str,
-                );
+            // gate の顔ぶれが変わって表面化したなら今の署名を覚え、同じ顔ぶれの間は黙る。
+            // 検査失敗で gate を出していない時は覚えない (次に通った時へ表面化を残す)。
+            if !verify_blocking
+                && gates_changed
+                && let Some(sig) = &gate_signature
+            {
+                remember_gate_signature(cwd, input.session_id.as_deref(), sig);
             }
-            // gate の顔ぶれが変わって促したなら今の署名を覚え、同じ顔ぶれの間は黙る。
-            if gates_changed && let Some(sig) = &gate_signature {
-                remember_gate_signature(input.cwd.as_deref(), input.session_id.as_deref(), sig);
-            }
-            let output = StopContinue {
-                decision: "block",
-                reason: reason.clone(),
-            };
-            match serde_json::to_string(&output) {
-                Ok(json) => {
-                    println!("{json}");
-                    ExitCode::SUCCESS
-                }
-                // JSON を出せない時は継続意図を代替契約 (終了コード 2 + stderr) で伝える。
-                Err(_) => {
-                    eprintln!("{reason}");
-                    ExitCode::from(2)
-                }
-            }
+            emit_stop_continue(reason)
         }
     }
+}
+
+/// Stop を終了させず継続させる出力を stdout へ出す (`decision=block`)。reason が新しい継続プロンプト。
+fn emit_stop_continue(reason: String) -> ExitCode {
+    let output = StopContinue {
+        decision: "block",
+        reason: reason.clone(),
+    };
+    match serde_json::to_string(&output) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        // JSON を出せない時は継続意図を代替契約 (終了コード 2 + stderr) で伝える。
+        Err(_) => {
+            eprintln!("{reason}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// 検査結果を得る。直前 verify.run / commit と作業ツリーが同一なら記録した結果を再利用し、無ければ
+/// 検査をフレッシュ実行して記録する (commit ゲートと Stop が共用。署名一致 = 同一結果で二重実行を避ける)。
+/// 戻り値の bool は「この呼び出しでフレッシュ実行したか」(= 初めて見た内容か)。
+fn cached_verify_outcome(
+    owox_dir: &Path,
+    work_dir: &Path,
+    canon: &owox_core::Canon,
+) -> (owox_core::VerifyOutcome, bool) {
+    let current_sig = crate::files::tree_signature(work_dir);
+    let cached = crate::cache::read_verify_record(owox_dir);
+    if let (Some(rec), Some(sig)) = (&cached, &current_sig)
+        && rec.signature == *sig
+    {
+        let outcome = match rec.verification.as_str() {
+            "passed" => owox_core::VerifyOutcome::Passed,
+            "failed" => owox_core::VerifyOutcome::Failed {
+                failed: rec.failed.clone(),
+            },
+            // needs_human = 検査未設定 (verify.rs の判定と整合)。
+            _ => owox_core::VerifyOutcome::NoChecks,
+        };
+        return (outcome, false);
+    }
+
+    let results = owox_core::run_checks(work_dir, &canon.verify.checks);
+    let outcome = if canon.verify.checks.is_empty() {
+        owox_core::VerifyOutcome::NoChecks
+    } else if results.iter().all(|r| r.passed) {
+        owox_core::VerifyOutcome::Passed
+    } else {
+        owox_core::VerifyOutcome::Failed {
+            failed: results
+                .iter()
+                .filter(|r| !r.passed)
+                .map(|r| r.name.clone())
+                .collect(),
+        }
+    };
+    // 記録して commit ゲート・次の Stop が再利用できるようにする。
+    if let Some(sig) = current_sig {
+        let (verification, failed) = match &outcome {
+            owox_core::VerifyOutcome::Passed => ("passed".to_string(), Vec::new()),
+            owox_core::VerifyOutcome::Failed { failed } => ("failed".to_string(), failed.clone()),
+            owox_core::VerifyOutcome::NoChecks => ("needs_human".to_string(), Vec::new()),
+        };
+        crate::cache::write_verify_record(
+            owox_dir,
+            &crate::cache::VerifyRecord {
+                signature: sig,
+                verification,
+                failed,
+            },
+        );
+    }
+    (outcome, true)
 }
 
 /// 床コンテキストを additionalContext で注入する。
@@ -587,12 +656,19 @@ fn stop() -> ExitCode {
 /// 正本が無い・読めない場合は妨げない (黙って続行)。
 fn session_start() -> ExitCode {
     let input = read_input();
+    let owox = owox_dir(input.cwd.as_deref());
+
+    if let (Some(session_id), Some(launcher_pid)) =
+        (input.session_id.as_deref(), crate::cache::launcher_pid())
+    {
+        crate::cache::write_launcher_session(&owox, launcher_pid, session_id);
+    }
 
     // 自動承認の窓はセッション限り。新しいセッションの開始 (startup|resume|compact) ごとに閉じ、
     // 人間が毎回明示的に開け直す (`docs/decisions/20260619-承認と自動改善ループ.md`)。
-    crate::cache::close_auto_window(&owox_dir(input.cwd.as_deref()));
+    crate::cache::close_auto_window(&owox);
 
-    let canon = match owox_core::load_canon(&owox_dir(input.cwd.as_deref())) {
+    let canon = match owox_core::load_canon(&owox) {
         Ok(canon) => canon,
         Err(err) => {
             eprintln!("owox hook session-start: 正本を読めない: {err}");
@@ -600,11 +676,32 @@ fn session_start() -> ExitCode {
         }
     };
 
-    // 床 + 育てたスキルの能動提示。スキルはテストを走らせず読むだけ (高速)。読めない時は床のみ。
+    // 床は薄い地図だけを入れる。任務と current pressure は mcp 側で live 計算する。
     let mut context = owox_core::floor_context(&canon);
-    if let Ok(skills) = owox_core::load_skills(&owox_dir(input.cwd.as_deref())) {
-        context.push_str(&owox_core::render_skills_section(&skills));
+    let mission = input
+        .session_id
+        .as_deref()
+        .map(|sid| crate::cache::mission_for_session(&owox, sid))
+        .unwrap_or(crate::cache::Mission::Work);
+    context.push_str(&format!("Current mission: {}.\n\n", mission.as_str()));
+    context.push_str(&current_pressure_line(&owox, &canon));
+    if let Ok(selection) = owox_core::select_delivery_for_phase(
+        &owox,
+        owox_core::DeliveryRequest::session_start_with_limit(
+            canon.state.phase,
+            canon.quality.delivery.always_limit,
+        ),
+        canon.state.phase,
+    ) {
+        let block = owox_core::render_delivery_block(&selection);
+        if !block.is_empty() {
+            context.push('\n');
+            context.push_str(&block);
+        }
     }
+    context.push_str(
+        "Use context scope=\"codebase\" when you need a repo map before choosing files to read.\n",
+    );
     let output = HookOutput {
         hook_specific_output: AdditionalContextOutput {
             hook_event_name: "SessionStart",
@@ -635,6 +732,29 @@ fn owox_dir(cwd: Option<&str>) -> PathBuf {
 /// 正本を読む。読めなければ None (呼び手は既定動作へ退避する)。
 fn load_canon_from(cwd: Option<&str>) -> Option<owox_core::Canon> {
     owox_core::load_canon(&owox_dir(cwd)).ok()
+}
+
+fn current_pressure_line(owox: &Path, canon: &owox_core::Canon) -> String {
+    let decisions = owox_core::list_decisions(owox).unwrap_or_default();
+    let tasks = owox_core::list_tasks(owox).unwrap_or_default();
+    let open = decisions
+        .iter()
+        .filter(|d| d.status == owox_core::DecisionStatus::Open)
+        .count();
+    let ready = tasks
+        .iter()
+        .filter(|t| owox_core::is_ready(t, &tasks))
+        .count();
+    let stale = owox_core::run_decay(
+        &tasks,
+        &decisions,
+        &canon.quality.decay,
+        &crate::clock::today_utc(),
+    )
+    .len();
+    format!(
+        "Current pressure: {open} open decisions, {ready} ready tasks, {stale} stale items.\n\n"
+    )
 }
 
 /// 作業ツリーに verify 対象の変更があるか。.owox 配下 (来歴・タスク・キャッシュ) は除外する。
@@ -688,42 +808,11 @@ fn session_terms_path(cwd: Option<&str>, session_id: &str) -> PathBuf {
         .join(format!("{}.json", safe_session_id(session_id)))
 }
 
-/// session ごとの Stop 再武装マーカ。前回 checklist を促した時の verify 署名を保つ。
-fn session_stop_path(cwd: Option<&str>, session_id: &str) -> PathBuf {
-    cache_dir(cwd)
-        .join("sessions")
-        .join(format!("{}-stop.json", safe_session_id(session_id)))
-}
-
 /// session ごとの未承認 gate 署名ファイル。前回促した時の open gate の顔ぶれを保つ。
 fn session_gate_path(cwd: Option<&str>, session_id: &str) -> PathBuf {
     cache_dir(cwd)
         .join("sessions")
         .join(format!("{}-gates.json", safe_session_id(session_id)))
-}
-
-/// 前回 Stop で checklist を促した時の verify 署名。促していない (ファイル無し)・読めない時は None。
-/// None は「まだ一度も促していない」を表し再武装扱いになる。verify 未実行時に促した記録は空文字列で残る。
-fn read_stop_verify_marker(cwd: Option<&str>, session_id: Option<&str>) -> Option<String> {
-    let sid = session_id?;
-    std::fs::read_to_string(session_stop_path(cwd, sid))
-        .ok()
-        .and_then(|s| serde_json::from_str::<String>(&s).ok())
-}
-
-/// 今回 checklist を促した時の verify 署名を session キャッシュへ保存。session_id が無い・書けない時は何もしない。
-fn remember_stop_verify_marker(cwd: Option<&str>, session_id: Option<&str>, signature: &str) {
-    let Some(sid) = session_id else {
-        return;
-    };
-    ensure_cache_ignored(cwd);
-    let path = session_stop_path(cwd, sid);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string(signature) {
-        let _ = std::fs::write(&path, json);
-    }
 }
 
 /// 前回 Stop で促した時の未承認 gate 署名。session_id が無い・読めない時は None。
@@ -840,6 +929,304 @@ fn remember_terms(cwd: Option<&str>, session_id: Option<&str>, new_terms: &[Stri
 /// `.owox/.gitignore` に `.cache/` を冪等に足す。キャッシュを履歴へ乗せない。
 fn ensure_cache_ignored(cwd: Option<&str>) {
     crate::cache::ensure_ignored(&owox_dir(cwd));
+}
+
+/// 読取前に軽く走査する本文。repo 内の text file だけ、各 file 8KB まで。
+fn glossary_scan_texts(input: &HookInput) -> Vec<owox_core::GlossaryScanText> {
+    let Some(work_dir) = input.cwd.as_deref().map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let paths = glossary_scan_targets(input, &work_dir);
+    let mut texts = Vec::new();
+    for path in paths {
+        if let Some(text) = read_text_prefix(&path, 8 * 1024) {
+            let rel = path
+                .strip_prefix(&work_dir)
+                .ok()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            texts.push(owox_core::GlossaryScanText { path: rel, text });
+        }
+    }
+    texts
+}
+
+fn glossary_scan_targets(input: &HookInput, work_dir: &Path) -> Vec<PathBuf> {
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    if is_read_tool(tool_name)
+        && let Some(path) = input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref())
+    {
+        return repo_local_paths(work_dir, &[path.to_string()]);
+    }
+    if tool_name != "Bash" {
+        return Vec::new();
+    }
+    let command = input
+        .tool_input
+        .as_ref()
+        .and_then(|t| t.command.as_deref())
+        .unwrap_or_default();
+    repo_local_paths(work_dir, &bash_read_targets(command))
+}
+
+fn bash_read_targets(command: &str) -> Vec<String> {
+    let tokens: Vec<String> = command
+        .split_whitespace()
+        .map(|t| t.trim_matches(['"', '\'', '`']).to_string())
+        .collect();
+    let Some(program) = tokens.first().map(String::as_str) else {
+        return Vec::new();
+    };
+    match program {
+        "cat" => tokens
+            .iter()
+            .skip(1)
+            .filter(|t| !t.starts_with('-'))
+            .cloned()
+            .collect(),
+        "head" | "tail" => {
+            let mut out = Vec::new();
+            let mut skip_next = false;
+            for token in tokens.iter().skip(1) {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if token == "-n" {
+                    skip_next = true;
+                    continue;
+                }
+                if token.starts_with('-') {
+                    continue;
+                }
+                out.push(token.clone());
+            }
+            out
+        }
+        "sed" => {
+            let mut seen_script = false;
+            let mut out = Vec::new();
+            let mut skip_next = false;
+            for token in tokens.iter().skip(1) {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if token == "-n" || token == "-e" {
+                    skip_next = token == "-e";
+                    continue;
+                }
+                if token.starts_with('-') {
+                    continue;
+                }
+                if !seen_script {
+                    seen_script = true;
+                    continue;
+                }
+                out.push(token.clone());
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn repo_local_paths(work_dir: &Path, raw_paths: &[String]) -> Vec<PathBuf> {
+    raw_paths
+        .iter()
+        .filter(|p| !p.is_empty() && !reads_canon_path(p))
+        .filter_map(|path| {
+            let joined = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                work_dir.join(path)
+            };
+            let canon = joined.canonicalize().ok()?;
+            canon.starts_with(work_dir).then_some(canon)
+        })
+        .collect()
+}
+
+fn pre_tool_use_delivery_paths(input: &HookInput) -> Vec<String> {
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    let cwd = input.cwd.as_deref().map(PathBuf::from);
+    match tool_name {
+        "Read" | "Open" | "Edit" | "Write" | "MultiEdit" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref())
+            .map(|p| vec![relativize_input_path(cwd.as_deref(), p)])
+            .unwrap_or_default(),
+        "apply_patch" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|patch| {
+                owox_core::parse_patch_changes(patch)
+                    .into_iter()
+                    .map(|c| relativize_input_path(cwd.as_deref(), &c.path))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "Bash" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|cmd| {
+                bash_read_targets(cmd)
+                    .into_iter()
+                    .map(|p| relativize_input_path(cwd.as_deref(), &p))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn edits_rules_file(input: &HookInput) -> bool {
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    let cwd = input.cwd.as_deref().map(PathBuf::from);
+    match tool_name {
+        "Edit" | "Write" | "MultiEdit" | "Read" | "Open" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.file_path.as_deref())
+            .map(|p| is_rules_path(&relativize_input_path(cwd.as_deref(), p)))
+            .unwrap_or(false),
+        "apply_patch" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|patch| {
+                owox_core::parse_patch_changes(patch)
+                    .iter()
+                    .any(|c| is_rules_path(&relativize_input_path(cwd.as_deref(), &c.path)))
+            })
+            .unwrap_or(false),
+        "Bash" => input
+            .tool_input
+            .as_ref()
+            .and_then(|t| t.command.as_deref())
+            .map(|cmd| {
+                owox_core::write_targets(cmd)
+                    .iter()
+                    .map(|p| relativize_input_path(cwd.as_deref(), p))
+                    .any(|p| is_rules_path(&p))
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn pre_tool_use_delivery_operations(
+    input: &HookInput,
+    delivery_paths: &[String],
+) -> Vec<owox_core::DeliveryOperation> {
+    let mut ops = Vec::new();
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    match tool_name {
+        "Read" | "Open" => push_unique(&mut ops, owox_core::DeliveryOperation::Read),
+        "Edit" | "Write" | "MultiEdit" => push_unique(&mut ops, owox_core::DeliveryOperation::Edit),
+        "apply_patch" => {
+            push_unique(&mut ops, owox_core::DeliveryOperation::Edit);
+            if input
+                .tool_input
+                .as_ref()
+                .and_then(|t| t.command.as_deref())
+                .map(|patch| {
+                    owox_core::parse_patch_changes(patch)
+                        .iter()
+                        .any(|c| c.op == owox_core::PatchOp::Delete)
+                })
+                .unwrap_or(false)
+            {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Delete);
+            }
+        }
+        "Bash" => {
+            let command = input
+                .tool_input
+                .as_ref()
+                .and_then(|t| t.command.as_deref())
+                .unwrap_or_default();
+            if !bash_read_targets(command).is_empty() {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Read);
+            }
+            if owox_core::is_git_commit(command) {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Commit);
+            }
+            if is_delete_command(command) {
+                push_unique(&mut ops, owox_core::DeliveryOperation::Delete);
+            }
+        }
+        _ => {}
+    }
+    for op in path_derived_operations(delivery_paths) {
+        push_unique(&mut ops, op);
+    }
+    ops
+}
+
+fn relativize_input_path(cwd: Option<&Path>, path: &str) -> String {
+    let raw = PathBuf::from(path.trim_matches(['"', '\'', '`']));
+    if let (Some(cwd), true) = (cwd, raw.is_absolute())
+        && let Ok(rel) = raw.strip_prefix(cwd)
+    {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    raw.to_string_lossy().replace('\\', "/")
+}
+
+fn is_delete_command(command: &str) -> bool {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    matches!(tokens.first().copied(), Some("rm"))
+        || matches!(tokens.first().copied(), Some("git")) && tokens.get(1) == Some(&"rm")
+}
+
+fn path_derived_operations(paths: &[String]) -> Vec<owox_core::DeliveryOperation> {
+    let mut out = Vec::new();
+    for path in paths {
+        if owox_core::is_dependency_path(path) {
+            push_unique(&mut out, owox_core::DeliveryOperation::DependencyChange);
+        }
+        if path.starts_with(".owox/requirements/") {
+            push_unique(&mut out, owox_core::DeliveryOperation::RequirementChange);
+        }
+        if path.starts_with(".owox/skills/") {
+            push_unique(&mut out, owox_core::DeliveryOperation::SkillChange);
+        }
+        if path.starts_with(".owox/") && !path.starts_with(".owox/skills/") {
+            push_unique(&mut out, owox_core::DeliveryOperation::CanonChange);
+        }
+    }
+    out
+}
+
+fn is_rules_path(path: &str) -> bool {
+    path == ".owox/rules.md" || path.ends_with("/.owox/rules.md")
+}
+
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+fn read_text_prefix(path: &Path, max_bytes: usize) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let head = &bytes[..bytes.len().min(max_bytes)];
+    Some(String::from_utf8_lossy(head).into_owned())
+}
+
+fn reads_canon_path(path: &str) -> bool {
+    let norm = path.trim_matches(['"', '\'', '`']).replace('\\', "/");
+    (norm == ".owox" || norm.contains(".owox/")) && !norm.contains(".owox/skills/")
 }
 
 /// stdin を読み、hook 入力 JSON を解釈する。空・不正なら既定値。
