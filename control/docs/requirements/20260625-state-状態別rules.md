@@ -74,8 +74,7 @@ rules に phase 条件を持たせる。
   - 他 phase の rules は出さない
 
 - `rules.lookup`
-  - 引数なしなら common + 現在 phase の rules を返す
-  - 必要なら全体取得を許す
+  - 引数なしで common + 現在 phase の rules を返す
 
 - `PreToolUse`
   - 編集前 policy push に現在 phase の rules を含める
@@ -102,7 +101,6 @@ rules に phase 条件を持たせる。
 
 - `SessionStart` が common + 現在 phase rules だけを注入する
 - `rules.lookup` が common + 現在 phase rules を返す
-- 全体取得で他 phase rules も返せる
 - `PreToolUse` の policy push に現在 phase rules が入る
 - `phase_enforcement` の既存挙動を壊さない
 - `profile` や layer と混ざらない
@@ -110,6 +108,5 @@ rules に phase 条件を持たせる。
 ## 未決事項
 
 - rules.md の正確な書式
-- `rules.lookup` の引数
 - phase rules の機械検査対象を作るか
 - `maintenance` 以外で commit に効かせる項目を許すか

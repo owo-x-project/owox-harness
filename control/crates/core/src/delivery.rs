@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::model::Phase;
 use crate::quality::glob_to_regex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,7 @@ struct DeliveryEntry {
     triggers: Vec<TriggerKind>,
     operations: Vec<DeliveryOperation>,
     paths: Vec<String>,
+    phase: Option<Phase>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -71,6 +73,7 @@ pub struct DeliverySelection {
 pub struct DeliveryRequest<'a> {
     pub operations: &'a [DeliveryOperation],
     pub paths: &'a [String],
+    pub phase: Option<Phase>,
     pub include_always: bool,
     pub include_path: bool,
     pub include_operation: bool,
@@ -78,10 +81,11 @@ pub struct DeliveryRequest<'a> {
 }
 
 impl<'a> DeliveryRequest<'a> {
-    pub fn session_start() -> Self {
+    pub fn session_start(phase: Phase) -> Self {
         Self {
             operations: &[],
             paths: &[],
+            phase: Some(phase),
             include_always: true,
             include_path: false,
             include_operation: false,
@@ -93,6 +97,7 @@ impl<'a> DeliveryRequest<'a> {
         Self {
             operations: &[],
             paths,
+            phase: None,
             include_always: false,
             include_path: true,
             include_operation: false,
@@ -104,6 +109,7 @@ impl<'a> DeliveryRequest<'a> {
         Self {
             operations,
             paths,
+            phase: None,
             include_always: false,
             include_path: true,
             include_operation: true,
@@ -116,6 +122,18 @@ pub fn select_delivery(
     owox_dir: &Path,
     req: DeliveryRequest<'_>,
 ) -> Result<DeliverySelection, String> {
+    select_delivery_for_phase(owox_dir, req, Phase::Initial)
+}
+
+pub fn select_delivery_for_phase(
+    owox_dir: &Path,
+    req: DeliveryRequest<'_>,
+    phase: Phase,
+) -> Result<DeliverySelection, String> {
+    let req = DeliveryRequest {
+        phase: req.phase.or(Some(phase)),
+        ..req
+    };
     let mut all = parse_rules(&owox_dir.join("rules.md"))?;
     all.extend(parse_practices(&owox_dir.join("practices.md"))?);
 
@@ -168,18 +186,21 @@ pub fn render_delivery_block(selection: &DeliverySelection) -> String {
 }
 
 fn matches_delivery(entry: &DeliveryEntry, req: &DeliveryRequest<'_>) -> bool {
+    let same_phase = entry.phase.is_none() || entry.phase == req.phase;
     let mut matched = false;
-    if req.include_always && entry.triggers.contains(&TriggerKind::Always) {
+    if req.include_always && entry.triggers.contains(&TriggerKind::Always) && same_phase {
         matched = true;
     }
     if req.include_operation
         && entry.triggers.contains(&TriggerKind::Operation)
+        && (entry.phase.is_none() || entry.phase == req.phase)
         && matches_operations(entry, req.operations)
     {
         matched = true;
     }
     if req.include_path
         && entry.triggers.contains(&TriggerKind::Path)
+        && (entry.phase.is_none() || entry.phase == req.phase)
         && matches_paths(entry, req.paths)
     {
         matched = true;
@@ -276,6 +297,15 @@ struct RawEntry {
     paths: Vec<String>,
 }
 
+fn phase_for_section(section: &str) -> Option<Phase> {
+    match section.trim() {
+        "Initial" => Some(Phase::Initial),
+        "Stable" => Some(Phase::Stable),
+        "Maintenance" => Some(Phase::Maintenance),
+        _ => None,
+    }
+}
+
 fn flush_entry(
     surface: DeliverySurface,
     current: &mut Option<RawEntry>,
@@ -285,6 +315,7 @@ fn flush_entry(
     let Some(raw) = current.take() else {
         return Ok(());
     };
+    let phase = phase_for_section(&raw.section);
     let triggers = resolve_triggers(surface, &raw)?;
     let operations = raw
         .operations
@@ -303,6 +334,7 @@ fn flush_entry(
         triggers,
         operations,
         paths: raw.paths,
+        phase,
     });
     *order += 1;
     out.sort_by_key(|e| e.order);
@@ -364,7 +396,12 @@ mod tests {
             "## Change policy\n- one\ntrigger: always\n- two\ntrigger: always\n- three\ntrigger: always\n- four\ntrigger: always\n",
         )
         .unwrap();
-        let selected = select_delivery(&owox, DeliveryRequest::session_start()).unwrap();
+        let selected = select_delivery_for_phase(
+            &owox,
+            DeliveryRequest::session_start(crate::model::Phase::Stable),
+            crate::model::Phase::Stable,
+        )
+        .unwrap();
         assert_eq!(selected.rules.len(), 3);
         assert_eq!(selected.practices.len(), 0);
     }

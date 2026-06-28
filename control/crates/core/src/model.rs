@@ -357,6 +357,14 @@ impl Practices {
 /// 全項目任意 (部分的に書ける)。
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
+    /// Common rules. Always delivered regardless of phase.
+    pub common: Vec<String>,
+    /// 初期 phase だけで効く rules。
+    pub initial: Vec<String>,
+    /// 安定 phase だけで効く rules。
+    pub stable: Vec<String>,
+    /// 保守 phase だけで効く rules。
+    pub maintenance: Vec<String>,
     /// 変更方針。AI が変更を進める際の方針。
     pub change_policy: Vec<String>,
     /// 依存追加の条件。
@@ -376,7 +384,15 @@ impl Rules {
     pub fn from_markdown(text: &str) -> Result<Rules, String> {
         let mut doc = Doc::parse(text);
 
+        let common = doc.take("Common").map(|s| s.list()).unwrap_or_default();
         let rules = Rules {
+            common,
+            initial: doc.take("Initial").map(|s| s.list()).unwrap_or_default(),
+            stable: doc.take("Stable").map(|s| s.list()).unwrap_or_default(),
+            maintenance: doc
+                .take("Maintenance")
+                .map(|s| s.list())
+                .unwrap_or_default(),
             change_policy: doc
                 .take("Change policy")
                 .map(|s| s.list())
@@ -402,6 +418,14 @@ impl Rules {
 
         reject_unknown(&doc)?;
         Ok(rules)
+    }
+
+    pub fn phase_rules(&self, phase: Phase) -> &[String] {
+        match phase {
+            Phase::Initial => &self.initial,
+            Phase::Stable => &self.stable,
+            Phase::Maintenance => &self.maintenance,
+        }
     }
 }
 

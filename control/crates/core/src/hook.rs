@@ -88,180 +88,6 @@ pub fn render_skills_section(skills: &[Skill]) -> String {
     out
 }
 
-/// 向き付け。正本の写しでなく「どう振る舞うか」を最小で案内する。AGENTS.md 廃止で床へ移した。
-fn render_orientation(out: &mut String) {
-    out.push_str("## How this project works\n\n");
-    out.push_str(
-        "Your guidance reaches you through this session context and the owox tools. Do not read or edit the canon under .owox/ directly.\n",
-    );
-    out.push_str(
-        "- To add to the canon use canon.add; to change or remove part of it use canon.propose, which a human approves before owox applies it. Never edit generated files to change the canon, since your edits are overwritten on the next generation.\n",
-    );
-    out.push_str("- You may author and read skills under .owox/skills/.\n\n");
-}
-
-/// 意図ルーティング表。人間が tool 名や用語を言わなくても、要望から使う tool へ AI が飛べるようにする。
-///
-/// 曖昧なリクエストでも意味が十分なら動かす要 (`docs/handoff/20260616-コンテキスト配信の再設計.md`)。
-/// 注入文に括弧補足は使わない (1 文で分かるよう書く)。
-fn render_routing(out: &mut String, axes: Option<&crate::profile::Axes>) {
-    out.push_str("## Acting on what the human asks\n\n");
-    out.push_str(
-        "Map the request to the right tool even when the human does not name a tool or a project term:\n",
-    );
-    out.push_str("- Change or remove a rule, value, principle, non-goal, or term definition: first read the current wording with rules.lookup or glossary.lookup, then use canon.propose, which a human approves before owox applies it. Never edit files to change the canon.\n");
-    out.push_str(
-        "- Add a new rule, value, principle, term, or a lasting practice to follow: use canon.add.\n",
-    );
-    out.push_str(
-        "- Record the results of investigating how something works, such as an API, a library, or a protocol: use knowledge.add, and recall it later with knowledge.lookup. This is research knowledge, distinct from a lasting practice to follow, which uses canon.add.\n",
-    );
-    out.push_str("- Decide what to work on next: use the next tool. Find what to read or where something lives: use the context tool.\n");
-    out.push_str("- Get the project's rules and policies: use rules.lookup, and call it before acting whenever the request concerns rules, policy, deletion, dependencies, or safety, whatever language it is written in. Get the meaning of a project-specific term: use glossary.lookup. Recall an operating practice not shown above: use practice.lookup.\n");
-    out.push_str("- Clean up, prune, or remove unneeded code: use review.lenses for the pruning perspective, then follow the deletion policy and verify before removing anything.\n");
-    out.push_str(&render_requirement_routing(axes));
-    out.push_str(
-        "- Set or change the project's nature that decides whether the methodology applies: use profile.set; see the current nature with profile.get; infer it for an existing codebase with profile.detect, which gives a draft a human confirms. Reverse-generate draft guardrails such as layers, boundaries, and irreversible operations from an existing codebase with canon.detect, also a human-confirmed proposal.\n",
-    );
-    out.push_str(
-        "- Keep a scratch note tied to the current branch, or recall what you were doing on it: use branch.note and branch.notes. This is branch-scoped; use decision.record for durable judgments.\n",
-    );
-    out.push_str(
-        "- When the human corrects or overrides something you did: capture the durable lesson with correction.note, which drafts it as a proposed practice for the human to approve. Do not wait to be told to make a rule.\n",
-    );
-    out.push_str(
-        "- When the human says to proceed automatically while they are away or asleep: turn on automatic approval with gate.auto_enable; its confirmation prompt is their consent and it lasts only this session. While it is on, approve non-guarded gates with gate.auto_approve instead of gate.approve. Review what was auto-approved with the next tool, and confirm with gate.confirm or undo with gate.revert.\n\n",
-    );
-}
-
-/// オーケストレーションパターンの床注入 (能動提示)。
-///
-/// 親エージェントが唯一のオーケストレータ (1階層) であることと、
-/// 役割・変種・呼び出しルールを能動的に届ける。
-/// 全て advisory: パターン適用は親が状況判断する。機械強制しない。
-/// (`docs/decisions/20260620-オーケストレーション具体化.md` 観点1・観点3)
-fn render_orchestration(out: &mut String, canon: &crate::model::Canon) {
-    out.push_str("## Orchestration\n\n");
-
-    // 担当。重い作業の既定委譲を能動提示し、親が抱え込んでコンテキストを浪費するのを防ぐ。
-    out.push_str(
-        "You are the sole orchestrator and spawn agents one level deep. \
-The default skeleton is investigate → plan → implement → verify, with review before merge. \
-By default delegate context-heavy work such as wide investigation, broad search, and review to agents and keep only their condensed results, on your own judgment without being told, so your own context stays lean and you stay a reliable manager through a long session.\n\n",
-    );
-
-    // 役割。canon から動的列挙してプロジェクト上書きを反映する。
-    out.push_str("Roles defined in this project:\n");
-    for role in &canon.agents.roles {
-        out.push_str("- ");
-        out.push_str(&role.id);
-        out.push_str(": ");
-        out.push_str(&role.responsibility);
-        out.push('\n');
-    }
-    out.push('\n');
-
-    // 役割の与え方 (フォールバック)。ネイティブ subagent が named role でなく注入指示で立つため、
-    // 親が spawn 時に役割の責務と制限を指示として渡す (`docs/validation/20260620-Phase9-オーケストレーション実機.md`)。
-    out.push_str(
-        "Your platform spawns agents by giving them instructions, not by selecting a named role, \
-so when you spawn an agent for a role, pass that role's responsibility above and its limits as its instructions. \
-Limits to pass on: read-only roles do not edit code; \
-the implement role edits only the supervised and free layers and does not commit; \
-no role performs irreversible or external operations.\n\n",
-    );
-
-    // 変種。review 変種は spawn 時の prompt 上書きで専門化する。多視点は fan-out。
-    if !canon.agents.variants.is_empty() {
-        out.push_str("Variants specialize a role at spawn time via prompt injection:\n");
-        for v in &canon.agents.variants {
-            out.push_str("- ");
-            out.push_str(&v.id);
-            out.push_str(" — applies to ");
-            out.push_str(&v.applies_to);
-            out.push_str(": ");
-            out.push_str(&v.prompt);
-            out.push('\n');
-        }
-        out.push_str(
-            "For multi-perspective review, fan out the review role once per lens in review.lenses.\n\n",
-        );
-    }
-
-    // 呼び出しルール。
-    out.push_str(
-        "Scale: small tasks may skip investigate and heavy review; \
-large tasks or the initial phase warrant the full skeleton. \
-Use the project phase as a signal, not a machine constraint.\n",
-    );
-    out.push_str(
-        "Parallelism: fan out read-only agents concurrently; \
-run implement agents in sequence to avoid file conflicts.\n",
-    );
-    out.push_str(
-        "Handoff: record durable results in .owox rather than in conversation; \
-promote transient findings to task, decision, knowledge, or verification as appropriate. \
-Subagents cannot self-approve guarded changes — when a guarded asset must change, \
-surface the need to the parent and hand it back to a human.\n\n",
-    );
-}
-
-/// 要件登録の意図ルーティング行。性質軸で文面を出し入れする。
-///
-/// requirements-shape=prfaq の時は PRFAQ 起草 (プレスリリースの枠組みと着手前の人間合意) を直書きし、
-/// 方法論が req スキル本文止まりで発火しない事故を防ぐ (`docs/validation/20260620-要件分類とreq到達性.md`)。
-/// 種類分類と「技術設計の制約は来歴へ」は常時。優先度を人間へは prioritization=ideal-first の時だけ。
-fn render_requirement_routing(axes: Option<&crate::profile::Axes>) -> String {
-    use crate::profile::{Prioritization, RequirementsShape};
-    let prfaq = axes.is_some_and(|a| matches!(a.requirements_shape, RequirementsShape::Prfaq));
-    let ideal_first = axes.is_some_and(|a| matches!(a.prioritization, Prioritization::IdealFirst));
-
-    let mut line = String::from("- Capture or refine what the work must satisfy: ");
-    if prfaq {
-        line.push_str("work backwards — frame it as a short press release of who benefits and why, and pass that benefit when you create the requirement; get the human's agreement on the what and the why before building. ");
-    } else {
-        line.push_str("use the req skill to draft it the project's way. ");
-    }
-    line.push_str("Tag each requirement as functional or non-functional, and keep technical and design constraints as decisions with decision.record rather than as requirements.");
-    if ideal_first {
-        line.push_str(" Leave the priority ranking to a human.");
-    }
-    line.push_str(" Finish or commit only after running verify.run.\n");
-    line
-}
-
-/// 注入する rules 本文 (`## Rules` ラベル配下)。lookup ツールと語トリガ push が共用する。
-///
-/// 「rules」と即分かるよう `## Rules` 見出しへまとめ、各方針を `###` の小節にする (概念1の是正)。
-/// detect: の正規表現は機械検出用なので出さない。空なら無い旨を返す。
-pub fn render_rules_block(rules: &Rules) -> String {
-    if !has_rules(rules) {
-        return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
-    }
-    let mut out = String::from("## Rules\n\nThe project's rules. Follow them.\n\n");
-    render_sublist(&mut out, "Change policy", &rules.change_policy);
-    render_sublist(&mut out, "Dependency policy", &rules.dependency_policy);
-    render_sublist(&mut out, "Deletion policy", &rules.deletion_policy);
-    render_sublist(&mut out, "Safety", &rules.safety);
-
-    if !rules.irreversible.is_empty() {
-        out.push_str("### Irreversible operations\n\n");
-        out.push_str("Confirm with a human before doing any of these.\n\n");
-        for op in &rules.irreversible {
-            push_pair(&mut out, &op.operation, &op.reason);
-        }
-        out.push('\n');
-    }
-    if !rules.human_gate.is_empty() {
-        out.push_str("### Hand back to a human\n\n");
-        for gate in &rules.human_gate {
-            push_pair(&mut out, &gate.situation, &gate.reason);
-        }
-        out.push('\n');
-    }
-    out
-}
-
 /// 注入する brand 本文 (`## Brand` ラベル配下)。語トリガ push が使う。
 ///
 /// Vision と全体スタイルは床に常時あるので除き、values/principles/non-goals/success-criteria だけを出す。
@@ -285,7 +111,22 @@ fn render_brand_block(brand: &Brand) -> Option<String> {
 
 /// rules に出すべき項目が 1 つでもあるか。
 fn has_rules(rules: &Rules) -> bool {
-    !(rules.change_policy.is_empty()
+    !(rules.common.is_empty()
+        && rules.initial.is_empty()
+        && rules.stable.is_empty()
+        && rules.maintenance.is_empty()
+        && rules.change_policy.is_empty()
+        && rules.dependency_policy.is_empty()
+        && rules.deletion_policy.is_empty()
+        && rules.safety.is_empty()
+        && rules.irreversible.is_empty()
+        && rules.human_gate.is_empty())
+}
+
+fn has_rules_for_phase(rules: &Rules, phase: Phase) -> bool {
+    !(rules.common.is_empty()
+        && rules.phase_rules(phase).is_empty()
+        && rules.change_policy.is_empty()
         && rules.dependency_policy.is_empty()
         && rules.deletion_policy.is_empty()
         && rules.safety.is_empty()
@@ -304,22 +145,74 @@ fn push_pair(out: &mut String, name: &str, detail: &str) {
     out.push('\n');
 }
 
-/// `## title` 配下へ `- item` を並べる。空なら節ごと出さない。
-fn render_list(out: &mut String, title: &str, items: &[String]) {
-    if items.is_empty() {
-        return;
+pub fn render_rules_block(rules: &Rules) -> String {
+    if !has_rules(rules) {
+        return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
     }
-    out.push_str("## ");
-    out.push_str(title);
-    out.push_str("\n\n");
-    for item in items {
-        out.push_str("- ");
-        out.push_str(item);
+    let mut out = String::from("## Rules\n\nThe project's rules. Follow them.\n\n");
+    render_sublist(&mut out, "Common", &rules.common);
+    render_sublist(&mut out, "Initial", &rules.initial);
+    render_sublist(&mut out, "Stable", &rules.stable);
+    render_sublist(&mut out, "Maintenance", &rules.maintenance);
+    render_sublist(&mut out, "Change policy", &rules.change_policy);
+    render_sublist(&mut out, "Dependency policy", &rules.dependency_policy);
+    render_sublist(&mut out, "Deletion policy", &rules.deletion_policy);
+    render_sublist(&mut out, "Safety", &rules.safety);
+
+    if !rules.irreversible.is_empty() {
+        out.push_str("### Irreversible operations\n\n");
+        out.push_str("Confirm with a human before doing any of these.\n\n");
+        for op in &rules.irreversible {
+            push_pair(&mut out, &op.operation, &op.reason);
+        }
         out.push('\n');
     }
-    out.push('\n');
+    if !rules.human_gate.is_empty() {
+        out.push_str("### Hand back to a human\n\n");
+        for gate in &rules.human_gate {
+            push_pair(&mut out, &gate.situation, &gate.reason);
+        }
+        out.push('\n');
+    }
+    out
 }
 
+pub fn render_rules_block_for_phase(rules: &Rules, phase: Phase) -> String {
+    if !has_rules_for_phase(rules, phase) {
+        return "## Rules\n\nNo rules are defined for this project yet.\n".to_string();
+    }
+    let mut out =
+        String::from("## Rules\n\nThe project's rules for the current phase. Follow them.\n\n");
+    render_sublist(&mut out, "Common", &rules.common);
+    match phase {
+        Phase::Initial => render_sublist(&mut out, "Initial", &rules.initial),
+        Phase::Stable => render_sublist(&mut out, "Stable", &rules.stable),
+        Phase::Maintenance => render_sublist(&mut out, "Maintenance", &rules.maintenance),
+    }
+    render_sublist(&mut out, "Change policy", &rules.change_policy);
+    render_sublist(&mut out, "Dependency policy", &rules.dependency_policy);
+    render_sublist(&mut out, "Deletion policy", &rules.deletion_policy);
+    render_sublist(&mut out, "Safety", &rules.safety);
+
+    if !rules.irreversible.is_empty() {
+        out.push_str("### Irreversible operations\n\n");
+        out.push_str("Confirm with a human before doing any of these.\n\n");
+        for op in &rules.irreversible {
+            push_pair(&mut out, &op.operation, &op.reason);
+        }
+        out.push('\n');
+    }
+    if !rules.human_gate.is_empty() {
+        out.push_str("### Hand back to a human\n\n");
+        for gate in &rules.human_gate {
+            push_pair(&mut out, &gate.situation, &gate.reason);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `## title` 配下へ `- item` を並べる。空なら節ごと出さない。
 /// `### title` 配下へ `- item` を並べる。`## Rules` / `## Brand` の小節用。空なら出さない。
 fn render_sublist(out: &mut String, title: &str, items: &[String]) {
     if items.is_empty() {
@@ -1772,29 +1665,6 @@ mod tests {
         assert!(out.contains("Use review to inspect changes"));
         assert!(out.contains("Use skill to grow or manage skills"));
         assert!(out.contains("rules.lookup, glossary.lookup, and practice.lookup"));
-    }
-
-    /// 要件ルーティングは prfaq の時だけ PRFAQ 起草を直書きし、ideal-first の時だけ優先度を人間へ向ける。
-    #[test]
-    fn requirement_routing_adapts_to_nature() {
-        use crate::profile::{Axes, Prioritization, RequirementsShape};
-        // 既定 (prfaq + ideal-first) は PRFAQ 起草と優先度文を出す。
-        let out = render_requirement_routing(Some(&Axes::default()));
-        assert!(out.contains("press release"));
-        assert!(out.contains("Leave the priority ranking to a human"));
-        assert!(out.contains("functional or non-functional"));
-        assert!(!out.contains(" ("));
-        // lightweight + incremental はどちらも出さず、req スキル誘導と種類分類だけ残す。
-        let lite = Axes {
-            requirements_shape: RequirementsShape::Lightweight,
-            prioritization: Prioritization::Incremental,
-            ..Axes::default()
-        };
-        let out2 = render_requirement_routing(Some(&lite));
-        assert!(!out2.contains("press release"));
-        assert!(!out2.contains("Leave the priority ranking"));
-        assert!(out2.contains("use the req skill"));
-        assert!(out2.contains("functional or non-functional"));
     }
 
     /// 床は Vision を残し、それ以外の長い常設一覧を落とす。

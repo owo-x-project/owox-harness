@@ -98,6 +98,8 @@ struct MissionStartParams {
 struct ContextParams {
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    reference_id: Option<String>,
 }
 
 /// release.check の引数。
@@ -731,6 +733,38 @@ impl OwoxServer {
             &body,
         ))])
     }
+
+    fn mission_data(&self, mission: crate::cache::Mission) -> Result<serde_json::Value, McpError> {
+        let preview = mission_preview(&self.owox_dir, self.repo_root(), mission);
+        let mut data = serde_json::json!({ "mission": mission.as_str() });
+        if let Some(obj) = data.as_object_mut() {
+            if let Some(preview) = preview {
+                obj.insert("next_preview".to_string(), serde_json::json!(preview));
+            }
+        }
+        if mission == crate::cache::Mission::Kickoff
+            && let Ok(canon) = owox_core::load_canon(&self.owox_dir)
+        {
+            let decisions = list_decisions(&self.owox_dir)
+                .map_err(|err| McpError::internal_error(format!("来歴を読めない: {err}"), None))?;
+            let tasks = list_tasks(&self.owox_dir).map_err(|err| {
+                McpError::internal_error(format!("タスクを読めない: {err}"), None)
+            })?;
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert(
+                    "kickoff".to_string(),
+                    kickoff_status_json(
+                        &self.owox_dir,
+                        self.repo_root(),
+                        &canon,
+                        &decisions,
+                        &tasks,
+                    ),
+                );
+            }
+        }
+        Ok(data)
+    }
 }
 
 /// 自動承認の同意源2系統 (`docs/decisions/20260620-自律度根本方針と自動承認パス再設計.md`)。
@@ -800,7 +834,7 @@ impl OwoxServer {
     /// 判断を来歴へ記録する。status=open は未決の人間ゲートになる。
     #[tool(
         name = "decision.record",
-        description = "Record a durable design or direction decision in the log under .owox/decisions/. Only for decisions future work must not silently reverse, not transient working state — use task.note for memos. Use status=open when it still needs human judgment (a pending gate); adopted/rejected/superseded for a settled record."
+        description = "Record a durable decision; use status=open for pending human judgment."
     )]
     async fn decision_record(
         &self,
@@ -835,18 +869,15 @@ impl OwoxServer {
     }
 
     /// 未承認の判断点 (status=open の来歴) を一覧する。
-    #[tool(
-        name = "gate.list",
-        description = "List pending human gates: decisions with status=open still needing human judgment."
-    )]
+    #[tool(name = "gate.list", description = "List pending human gates.")]
     async fn gate_list(&self) -> Result<CallToolResult, McpError> {
         self.envelope_result(list_gates(&self.owox_dir))
     }
 
-    /// 現在 session の任務を開始する。kickoff などの間、tool の返り方を任務向けへ寄せる。
+    /// 現在 session の任務を切り替える。kickoff などの間、tool の返り方を任務向けへ寄せる。
     #[tool(
         name = "mission.start",
-        description = "Set the current session mission: work, kickoff, review, verify, or handoff. This changes how mission-aware tools report until another mission is set."
+        description = "Switch the current session mission; use work for the default work mode."
     )]
     async fn mission_start(
         &self,
@@ -859,34 +890,7 @@ impl OwoxServer {
         if let Err(err) = crate::cache::set_current_mission(&self.owox_dir, mission) {
             return self.envelope_result(Envelope::failed(err));
         }
-        let preview = mission_preview(&self.owox_dir, self.repo_root(), mission);
-        let mut data = serde_json::json!({ "mission": mission.as_str() });
-        if let Some(obj) = data.as_object_mut() {
-            if let Some(preview) = preview {
-                obj.insert("next_preview".to_string(), serde_json::json!(preview));
-            }
-        }
-        if mission == crate::cache::Mission::Kickoff
-            && let Ok(canon) = owox_core::load_canon(&self.owox_dir)
-        {
-            let decisions = list_decisions(&self.owox_dir)
-                .map_err(|err| McpError::internal_error(format!("来歴を読めない: {err}"), None))?;
-            let tasks = list_tasks(&self.owox_dir).map_err(|err| {
-                McpError::internal_error(format!("タスクを読めない: {err}"), None)
-            })?;
-            if let Some(obj) = data.as_object_mut() {
-                obj.insert(
-                    "kickoff".to_string(),
-                    kickoff_status_json(
-                        &self.owox_dir,
-                        self.repo_root(),
-                        &canon,
-                        &decisions,
-                        &tasks,
-                    ),
-                );
-            }
-        }
+        let data = self.mission_data(mission)?;
         self.envelope_result(Envelope::ok(
             format!("Session mission set to {}.", mission.as_str()),
             data,
@@ -899,12 +903,28 @@ impl OwoxServer {
     /// `docs/decisions/20260613-Phase5-実機検証の是正.md`)。封筒でなく描画した本文を返す。
     #[tool(
         name = "context",
-        description = "Get a read map for the current task, diff, or codebase; use this instead of reading .owox/ directly."
+        description = "Get the current read map instead of reading .owox/ directly."
     )]
     async fn context(
         &self,
         Parameters(p): Parameters<ContextParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(reference_id) = p.reference_id.as_deref().map(str::trim)
+            && !reference_id.is_empty()
+        {
+            if parse_reference_query(reference_id).is_none() {
+                return self.envelope_result(Envelope::failed(
+                    "reference_id は owox:req:<id>, owox:req:<id>#<criterion>, owox:dec:<id> のみ",
+                ));
+            }
+            let body = render_reference_context(
+                self.repo_root(),
+                &self.owox_dir,
+                reference_id,
+                self.mission(),
+            )?;
+            return Ok(self.text_result(body));
+        }
         let body = match p.scope.as_deref() {
             None | Some("") | Some("default") => {
                 let canon = owox_core::load_canon(&self.owox_dir).map_err(|err| {
@@ -944,7 +964,7 @@ impl OwoxServer {
     /// 次の一手。未決の人間ゲート (status=open の来歴) と ready タスクを返す。
     #[tool(
         name = "next",
-        description = "Get the next decision or ready work, with mission-aware guidance when active."
+        description = "Get the next gate or ready work, with mission-aware guidance when active."
     )]
     async fn next(&self) -> Result<CallToolResult, McpError> {
         let decisions = list_decisions(&self.owox_dir)
@@ -1012,6 +1032,9 @@ impl OwoxServer {
                 build_gardening_findings(&self.owox_dir, repo_root, &canon, &decay, None, false)
             })
             .unwrap_or_default();
+        let changed_files = crate::files::changed_files(repo_root);
+        let glossary_suggestions =
+            build_glossary_suggestions(repo_root, &self.owox_dir, &changed_files, true);
         // 性質軸を解決する (profile.toml)。読めない/解決失敗時はフル方法論既定で振る舞う。
         let axes = self.resolved_axes();
         // 自動承認の同意源2系統 (profile 由来=永続・session 由来=session 限り)。
@@ -1023,6 +1046,7 @@ impl OwoxServer {
             &decay,
             &routines,
             &gardening,
+            &glossary_suggestions,
             axes,
             auto,
             self.mission(),
@@ -1039,7 +1063,7 @@ impl OwoxServer {
     #[tool(
         name = "gate.approve",
         annotations(destructive_hint = true),
-        description = "Approve a pending gate: transition an open decision to adopted and record the approval. Call this yourself when the human decides to approve — they cannot call it. Calling it shows a CLI confirmation prompt, which is the human's approval gate; do not ask them to run a tool or act first. If the gate carries a proposed canon change from canon.propose op=remove/replace, approving applies it."
+        description = "Approve an open gate after the human decides."
     )]
     async fn gate_approve(
         &self,
@@ -1064,7 +1088,7 @@ impl OwoxServer {
     #[tool(
         name = "gate.auto_enable",
         annotations(destructive_hint = true),
-        description = "Turn on automatic approval for this session so you can approve non-guarded gates yourself with gate.auto_approve while the human is away. Only needed for cautious projects; a flat-architecture project already has automatic approval on by its nature. Call only when the human tells you to proceed automatically — its CLI confirmation prompt is their consent. Lasts this session and closes at the next session start; turn it off sooner with gate.auto_disable. Guarded gates (changes to brand, rules, glossary, and plain open decisions) still need gate.approve."
+        description = "Enable session auto-approval for non-guarded gates; guarded gates still need gate.approve."
     )]
     async fn gate_auto_enable(&self) -> Result<CallToolResult, McpError> {
         crate::cache::open_auto_window(&self.owox_dir);
@@ -1077,7 +1101,7 @@ impl OwoxServer {
     /// 自動承認の session 窓を閉じる。profile 由来 (flat) の auto は残る (profile.set で性質を変えるまで)。
     #[tool(
         name = "gate.auto_disable",
-        description = "Close the session's automatic-approval window. On a cautious project this turns automatic approval off, so non-guarded gates again need gate.approve. On a flat-architecture project automatic approval stays on by its nature; change that with profile.set, not here."
+        description = "Close the session auto-approval window."
     )]
     async fn gate_auto_disable(&self) -> Result<CallToolResult, McpError> {
         crate::cache::close_auto_window(&self.owox_dir);
@@ -1100,7 +1124,7 @@ impl OwoxServer {
     /// 実効 auto が有効なこと (profile 由来の性質既定か session 由来の窓)、対象が guarded でないこと。
     #[tool(
         name = "gate.auto_approve",
-        description = "Approve a non-guarded gate automatically, without a human confirmation prompt, while automatic approval is on. Automatic approval is on either by project nature (a flat-architecture project keeps it on) or for the session after gate.auto_enable. Refuses guarded gates (changes to brand, rules, glossary, and plain open decisions) and refuses when automatic approval is off; use gate.approve for those. owox marks what it auto-approves and lists it in the next tool for the human to confirm with gate.confirm or undo with gate.revert."
+        description = "Approve a non-guarded gate only while auto-approval is on."
     )]
     async fn gate_auto_approve(
         &self,
@@ -1132,7 +1156,7 @@ impl OwoxServer {
     /// 自動承認を人間が後から確認済みにする。後追いキューから外れる。
     #[tool(
         name = "gate.confirm",
-        description = "Confirm an auto-approved decision after the human has reviewed it, removing it from the follow-up queue in the next tool. The id comes from that queue."
+        description = "Confirm a human-reviewed auto-approved decision."
     )]
     async fn gate_confirm(
         &self,
@@ -1151,7 +1175,7 @@ impl OwoxServer {
     #[tool(
         name = "gate.revert",
         annotations(destructive_hint = true),
-        description = "Undo an auto-approved decision: revert any canon change it applied and mark it rejected. Use when the human reviews the follow-up queue and rejects one. The id comes from the next tool's auto-approved list."
+        description = "Undo an auto-approved decision and revert any applied canon change."
     )]
     async fn gate_revert(
         &self,
@@ -1172,7 +1196,7 @@ impl OwoxServer {
     /// 人間の訂正から practice 草案を起草する。固定はせず open gate として積む。
     #[tool(
         name = "correction.note",
-        description = "When the human corrects or overrides something you did, capture the durable lesson here instead of waiting to be told to make a rule. owox drafts it as a proposed practice recorded as an open gate; it is not fixed until a human approves the gate (gate.approve, or gate.auto_approve while automatic approval is on), after which owox adds it to the practices."
+        description = "Record a human correction as a proposed practice gate."
     )]
     async fn correction_note(
         &self,
@@ -1189,7 +1213,7 @@ impl OwoxServer {
     /// 要件を作る。受け入れ基準をまとめて受けられる。
     #[tool(
         name = "requirement.create",
-        description = "Create a NEW requirement in .owox/requirements/. It has a status (draft default; accepted/superseded human-declared), a statement of what must hold, acceptance criteria (each given/when/then with an optional verification link), and a kind (functional or non-functional). Keep technical or design constraints as decisions via decision.record, not requirements. Working backwards: pass benefit (who gains and why), recorded as a linked decision and required under prfaq requirements-shape. Under ideal-first prioritization do not set priority; propose a ranking, let a human decide, then record it with requirement.update. To re-scope an existing one use requirement.update with a reason, not a duplicate."
+        description = "Create a requirement with status, criteria, and links."
     )]
     async fn requirement_create(
         &self,
@@ -1248,7 +1272,7 @@ impl OwoxServer {
     /// 要件を一覧する。状態で絞れる。検証 link が欠ける基準数も返す。
     #[tool(
         name = "requirement.list",
-        description = "List requirements with status, acceptance criteria count, and how many criteria still lack a verification link. Optionally filter by status."
+        description = "List requirements and missing verification links."
     )]
     async fn requirement_list(
         &self,
@@ -1263,7 +1287,7 @@ impl OwoxServer {
     /// 要件 1 件を全文読む。canon を直読みせずここから取る。
     #[tool(
         name = "requirement.get",
-        description = "Get one requirement in full: statement, acceptance criteria with given/when/then and verification links, status, and links. Use instead of reading .owox/ directly."
+        description = "Get one requirement with criteria and links."
     )]
     async fn requirement_get(
         &self,
@@ -1275,7 +1299,7 @@ impl OwoxServer {
     /// 要件の title・statement・状態を変える。本質変更は reason 必須・来歴連動。
     #[tool(
         name = "requirement.update",
-        description = "Update a requirement's status, title, or statement. Changing the title or statement is a content change requiring a reason, recorded as a linked decision; status changes are lightweight. To add or link acceptance criteria use requirement.add_criterion and requirement.link_verification."
+        description = "Update a requirement; title or statement changes need a reason."
     )]
     async fn requirement_update(
         &self,
@@ -1302,7 +1326,7 @@ impl OwoxServer {
     /// 受け入れ基準を 1 件足す。番号は自動採番する。
     #[tool(
         name = "requirement.add_criterion",
-        description = "Add an acceptance criterion (given/when/then) to a requirement, assigned the next criterion number. Link a verification to it later with requirement.link_verification."
+        description = "Add an acceptance criterion."
     )]
     async fn requirement_add_criterion(
         &self,
@@ -1320,7 +1344,7 @@ impl OwoxServer {
     /// 受け入れ基準に検証 link を張る。
     #[tool(
         name = "requirement.link_verification",
-        description = "Link a verification to an acceptance criterion of a requirement. It must be a check name declared in [[verify.checks]] in config.toml; an unknown name is rejected with the available names listed. This is the requirement-to-test trace; verify.run later uses it to machine-judge requirement completion."
+        description = "Link a verification check to a criterion."
     )]
     async fn requirement_link_verification(
         &self,
@@ -1338,7 +1362,7 @@ impl OwoxServer {
     /// 今の変更に適用されるレビュー観点を機械選択して返す (routable な枠組み)。
     #[tool(
         name = "review.lenses",
-        description = "Select the review perspectives that apply to the current change; use this before review, not as a verifier."
+        description = "Select the review perspectives for the current change."
     )]
     async fn review_lenses(&self) -> Result<CallToolResult, McpError> {
         let work_dir = self.owox_dir.parent().unwrap_or(&self.owox_dir);
@@ -1353,7 +1377,7 @@ impl OwoxServer {
     /// 完了を3区別して返す。検証完了だけ機械判定、作業・要件完了は人間判断。
     #[tool(
         name = "verify.run",
-        description = "Run the project's configured checks and report work, requirement, and verification completion."
+        description = "Run configured checks and report completion status."
     )]
     async fn verify_run(&self) -> Result<CallToolResult, McpError> {
         let canon = match owox_core::load_canon(&self.owox_dir) {
@@ -1411,6 +1435,8 @@ impl OwoxServer {
         ));
         let mut env = run_verify(&canon.verify, &requirements, &quality, &decay, work_dir);
         let changed = crate::files::changed_files(work_dir);
+        let glossary_suggestions =
+            build_glossary_suggestions(work_dir, &self.owox_dir, &changed, true);
         let mut ops = vec![owox_core::DeliveryOperation::Verify];
         ops.extend(path_change_operations(&changed));
         attach_delivery_guidance(&mut env, &self.owox_dir, &ops, &changed);
@@ -1508,6 +1534,23 @@ impl OwoxServer {
         let skills = owox_core::load_skills(&self.owox_dir).unwrap_or_default();
         let routines =
             owox_core::run_routine_suggestions(&self.owox_dir, &canon.quality.routine, &skills);
+        if !glossary_suggestions.is_empty() {
+            let items: Vec<serde_json::Value> = glossary_suggestions
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "term": s.term,
+                        "reason": s.reason,
+                        "examples": s.examples,
+                    })
+                })
+                .collect();
+            merge_data(
+                &mut env,
+                "glossary_suggestions",
+                serde_json::Value::Array(items),
+            );
+        }
         if !routines.is_empty() {
             let items: Vec<serde_json::Value> = routines
                 .iter()
@@ -1536,7 +1579,7 @@ impl OwoxServer {
     /// (`docs/decisions/20260621-Phase10-配布とrelease正本.md`)。
     #[tool(
         name = "release.check",
-        description = "Verify a release before publishing, for projects that ship one: read .owox/release.toml, extract the current version from its configured file, confirm every expected artifact exists under the dist directory, and run the project's delegated artifact-verification checks (checksums, signing). Reports no-op guidance when no release.toml exists."
+        description = "Verify a release before shipping."
     )]
     async fn release_check(
         &self,
@@ -1633,7 +1676,7 @@ impl OwoxServer {
     /// プロジェクト状態 (phase) を宣言する。機械ゲートの厳しさが変わる。
     #[tool(
         name = "state.set",
-        description = "Declare the project phase: initial (early, lenient gates), stable, or maintenance (strict gates; open decisions block commit). Recorded in the decision log."
+        description = "Set the project phase; maintenance blocks commit on open decisions."
     )]
     async fn state_set(
         &self,
@@ -1649,7 +1692,7 @@ impl OwoxServer {
     /// プロジェクトの性質 (固定) を宣言する。開発方法論のモジュールが軸で出し入れされる。
     #[tool(
         name = "profile.set",
-        description = "Declare the project's nature: pick a named bundle (clean-arch-app, script, library, data-platform, research) with preset, or override individual axes (requirements-shape, prioritization, delivery, architecture). Turns methodology modules on or off; recorded in the decision log. Nature is fixed but changeable later. For an existing project, run profile.detect first and confirm the draft with a human."
+        description = "Set project nature by preset or axes."
     )]
     async fn profile_set(
         &self,
@@ -1670,7 +1713,7 @@ impl OwoxServer {
     /// 性質を既存コードから推定する (逆生成)。draft + 根拠を返し、確定はしない (人間ゲート)。
     #[tool(
         name = "profile.detect",
-        description = "Detect a draft project nature from existing code; proposal only, never applies it."
+        description = "Detect a draft project nature for human review."
     )]
     async fn profile_detect(&self) -> Result<CallToolResult, McpError> {
         let (files, has_quality_layers, has_version_tags) = self.detect_inputs();
@@ -1688,7 +1731,7 @@ impl OwoxServer {
     /// 既存コードから rules / quality の初期案を逆生成する。draft + 根拠を返し、確定しない (人間ゲート)。
     #[tool(
         name = "canon.detect",
-        description = "Detect draft guardrails from existing code for human review; proposal only, never writes."
+        description = "Detect draft guardrails from existing code for human review."
     )]
     async fn canon_detect(&self) -> Result<CallToolResult, McpError> {
         let (files, has_quality_layers, has_version_tags) = self.detect_inputs();
@@ -1712,7 +1755,7 @@ impl OwoxServer {
     /// セッション立ち上げを束ねる。向き付け・性質・既存コードからの逆生成案を1呼び出しで返す。
     #[tool(
         name = "kickoff",
-        description = "Return startup orientation for a human-reviewed kickoff; reads only, never writes."
+        description = "Return kickoff orientation; reads only."
     )]
     async fn kickoff(&self) -> Result<CallToolResult, McpError> {
         let canon = owox_core::load_canon(&self.owox_dir).ok();
@@ -1789,7 +1832,7 @@ impl OwoxServer {
     /// 現在の性質 (解決済み実効軸) を返す。
     #[tool(
         name = "profile.get",
-        description = "Get the project's current nature: the resolved four axes (requirements-shape, prioritization, delivery, architecture) and which methodology modules are active. Defaults to the full methodology when no profile is set."
+        description = "Get resolved nature axes and active methodology modules."
     )]
     async fn profile_get(&self) -> Result<CallToolResult, McpError> {
         let profile = owox_core::load_canon(&self.owox_dir)
@@ -1822,7 +1865,7 @@ impl OwoxServer {
     /// 現在のブランチの作業記憶へメモを足す。
     #[tool(
         name = "branch.note",
-        description = "Append a working note to the current git branch's memory: what you are doing on this branch, an in-progress judgment, or a scratch thought. Keyed by branch, kept out of git, not injected into context — read on demand with branch.notes. Use for branch-scoped scratch; decision.record for durable judgments, task.note for task-scoped notes. Secrets are rejected."
+        description = "Append branch-scoped scratch work."
     )]
     async fn branch_note(
         &self,
@@ -1846,7 +1889,7 @@ impl OwoxServer {
     /// 現在のブランチの作業記憶を読む (オンデマンド)。
     #[tool(
         name = "branch.notes",
-        description = "Read the current git branch's working memory: the notes recorded on this branch. On-demand; branch memory is never injected into the session context."
+        description = "Read the current branch's scratch work."
     )]
     async fn branch_notes(&self) -> Result<CallToolResult, McpError> {
         let work_dir = self.repo_root();
@@ -1858,7 +1901,7 @@ impl OwoxServer {
     /// やることを 1 件作る。
     #[tool(
         name = "task.create",
-        description = "Create a NEW task in .owox/tasks/. Tasks have a status (todo by default), links to a requirement/decision/verification, typed dependencies, and optional external refs mapping to an issue tracker (each \"system: reference\", e.g. \"github: owner/repo#123\"). To rename or re-scope an existing task use task.update with a reason, not a duplicate."
+        description = "Create a new task with links, dependencies, and optional external refs."
     )]
     async fn task_create(
         &self,
@@ -1889,10 +1932,7 @@ impl OwoxServer {
     }
 
     /// タスクを一覧する。ready=true で前提解決済のみ。
-    #[tool(
-        name = "task.list",
-        description = "List tasks. Pass ready=true for only tasks whose blocking dependencies are all done (ready to work on). Optionally filter by status."
-    )]
+    #[tool(name = "task.list", description = "List tasks, or only ready tasks.")]
     async fn task_list(
         &self,
         Parameters(p): Parameters<TaskListParams>,
@@ -1907,7 +1947,7 @@ impl OwoxServer {
     /// タスクの title・状態・link・依存を変える (done は task.close)。
     #[tool(
         name = "task.update",
-        description = "Update a task's title, status, links, add dependencies, or add external refs (each \"system: reference\", e.g. \"github: owner/repo#123\"; duplicates are not re-added). Changing the title is a content change requiring a reason, recorded as a decision; status/links/deps/external changes are lightweight. To mark a task done use task.close (it requires verification); task.update rejects the done transition."
+        description = "Update a task; title changes need a reason and done uses task.close."
     )]
     async fn task_update(
         &self,
@@ -1940,10 +1980,7 @@ impl OwoxServer {
     }
 
     /// タスクへ一時メモを追記する (来歴ではない軽量記録)。
-    #[tool(
-        name = "task.note",
-        description = "Append a short working note to a task. Use for transient working state (what you tried, what to check next) instead of decision.record, which is for durable design or direction decisions."
-    )]
+    #[tool(name = "task.note", description = "Append a transient task note.")]
     async fn task_note(
         &self,
         Parameters(p): Parameters<TaskNoteParams>,
@@ -1952,10 +1989,7 @@ impl OwoxServer {
     }
 
     /// タスクを依存でつなぐ。
-    #[tool(
-        name = "task.link",
-        description = "Add a typed dependency to a task: blocks, parent-child, related, or discovered-from. A blocks dependency keeps the task out of the ready list until its target is done."
-    )]
+    #[tool(name = "task.link", description = "Add a task dependency link.")]
     async fn task_link(
         &self,
         Parameters(p): Parameters<TaskLinkParams>,
@@ -1970,7 +2004,7 @@ impl OwoxServer {
     /// タスクを閉じる。検証を通らないと閉じれない (自己申告 done を排除)。
     #[tool(
         name = "task.close",
-        description = "Close a task as done. Runs the configured verification checks first; the task only closes if they pass. With no checks configured it returns needs_human."
+        description = "Close a task as done only after configured verification passes."
     )]
     async fn task_close(
         &self,
@@ -1995,7 +2029,7 @@ impl OwoxServer {
     /// タスクを破棄する。理由を来歴へ残す (silent rot 禁止)。
     #[tool(
         name = "task.drop",
-        description = "Drop a task that is no longer needed. A reason is required and recorded in the decision log, so dropped work is never silently lost."
+        description = "Drop an unneeded task with a recorded reason."
     )]
     async fn task_drop(
         &self,
@@ -2007,7 +2041,7 @@ impl OwoxServer {
     /// スキルの 2 軸状態 (テスト・昇格) を一覧する。
     #[tool(
         name = "skill.list",
-        description = "List the project's skills with test state and stage; use this before register or promote."
+        description = "List project skills with test state and stage."
     )]
     async fn skill_list(&self) -> Result<CallToolResult, McpError> {
         self.envelope_result(list_skills_envelope(&self.owox_dir, self.repo_root()))
@@ -2016,7 +2050,7 @@ impl OwoxServer {
     /// スキルのテストを実行し、合格・適格なら登録 (生成) する。
     #[tool(
         name = "skill.register",
-        description = "Run a skill's bundled tests and, if they pass and it is well-formed, generate it for use (register). A contract lint runs first: name/description present, any scripts/<name> the SKILL.md references is bundled, each tests/ file executable. Returns the failure if the lint or tests fail. A skill opting into implicit auto-invocation must have tests."
+        description = "Run skill lint and tests, then register on pass."
     )]
     async fn skill_register(
         &self,
@@ -2028,7 +2062,7 @@ impl OwoxServer {
     /// スキルを昇格する (人間ゲート)。人間承認後にだけ使う。
     #[tool(
         name = "skill.promote",
-        description = "Promote a registered skill to trusted canon. Use only after a human has approved. Recorded in the decision log and enables auto-invocation for skills that opt into implicit. A draft (unregistered) skill cannot be promoted."
+        description = "Promote a registered skill after human approval."
     )]
     async fn skill_promote(
         &self,
@@ -2045,7 +2079,7 @@ impl OwoxServer {
     /// スキルの経験メモリ (memory.md) へ追記する。
     #[tool(
         name = "skill.remember",
-        description = "Append a lesson to a skill's experience memory (memory.md): what failed, what to change next time. Guides later improvement and stays in the canon only, not generated."
+        description = "Append a lesson to a skill memory."
     )]
     async fn skill_remember(
         &self,
@@ -2057,7 +2091,7 @@ impl OwoxServer {
     /// canon (brand / rules / practices / glossary) へ項目を追加する。追加は AI 直接 + 来歴。
     #[tool(
         name = "canon.add",
-        description = "Add one item to the project canon (target: brand, rules, practices, or glossary). Adding is AI-direct and recorded; changing or removing existing items is a human gate via canon.propose. For brand and rules also give section (which list to append to); if missing or unknown the response lists valid sections. For glossary set text to \"term: definition\". For practices set text to the practice grown from experience."
+        description = "Add one canon item; changing or removing existing canon uses canon.propose."
     )]
     async fn canon_add(
         &self,
@@ -2075,7 +2109,7 @@ impl OwoxServer {
     /// canon の変更・削除を提案する。canon は変えず人間判断点として返す。
     #[tool(
         name = "canon.propose",
-        description = "Propose changing or removing part of the canon (target: brand, rules, practices, or glossary). A decision for a human; never edits directly. To remove or replace one item, pass op=remove (with item) or op=replace (with item and to); owox applies it after a human approves the gate. For brand and rules also give section; if item is not found the response lists current items. For edits that are not a single list item, pass change as free text. To only add an item, use canon.add."
+        description = "Propose one canon change or removal for human decision."
     )]
     async fn canon_propose(
         &self,
@@ -2098,7 +2132,7 @@ impl OwoxServer {
     /// 汎用経験 (skill + practices) を out_path へ持ち出す。持ち出しは人間ゲート。
     #[tool(
         name = "experience.export",
-        description = "Export generic experience (skills' SKILL.md + scripts, and practices) to out_path as a portable bundle. Domain-specific parts (memory, tests, owox.toml, brand-fixed canon) are excluded by type. Scans for secrets and refuses to write if any are found; otherwise writes and returns needs_human for review before sharing externally."
+        description = "Export generic skills, scripts, and practices after secret scan and human review."
     )]
     async fn experience_export(
         &self,
@@ -2113,7 +2147,7 @@ impl OwoxServer {
     /// 別プロジェクトの経験束を取り込む。秘密検出時は人間ゲートで止める。
     #[tool(
         name = "experience.import",
-        description = "Import a generic experience bundle from in_path: skills are written as drafts (re-run their tests and promote them here) and practices are merged. Scans for secrets and refuses to import, returning needs_human, if any are found."
+        description = "Import generic skills as drafts and merge practices; refuse on secret scan."
     )]
     async fn experience_import(
         &self,
@@ -2128,19 +2162,38 @@ impl OwoxServer {
     /// 用語の定義を引く。canon を直読みせずここから取る。
     #[tool(
         name = "glossary.lookup",
-        description = "Look up a project term's definition instead of reading the canon directly."
+        description = "Look up a project term definition."
     )]
     async fn glossary_lookup(
         &self,
         Parameters(p): Parameters<GlossaryTermParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.envelope_result(glossary_lookup(&self.owox_dir, &p.term))
+        let env = glossary_lookup(&self.owox_dir, &p.term);
+        let miss = env
+            .data
+            .as_ref()
+            .and_then(|data| data.get("found"))
+            .and_then(|found| found.as_bool())
+            == Some(false);
+        if miss {
+            let current_session = crate::cache::current_session_id(&self.owox_dir);
+            crate::cache::remember_glossary_hits(
+                &self.owox_dir,
+                current_session.as_deref(),
+                &[owox_core::GlossaryTermHit {
+                    term: p.term.clone(),
+                    source: "lookup miss".to_string(),
+                    example: p.term.clone(),
+                }],
+            );
+        }
+        self.envelope_result(env)
     }
 
     /// 運用指針を語で引く。床が肥大化で縮んだ後でも古い指針を取り出せる。
     #[tool(
         name = "practice.lookup",
-        description = "Search operating practices by keyword when the session context does not show them."
+        description = "Search operating practices by keyword."
     )]
     async fn practice_lookup(
         &self,
@@ -2152,7 +2205,7 @@ impl OwoxServer {
     /// 調査知識を記録する。要約・出典を秘密走査し、supersedes 指定で旧を置き換える。
     #[tool(
         name = "knowledge.add",
-        description = "Record durable research knowledge in .owox/knowledge/: a finding with summary, sources, research date, and optional tags. Use for results of investigating how something works (an API, library, protocol), not design decisions (use decision.record) or operating practices (use canon.add target=practices). Updates are supersede-only: to revise a prior entry, add a new one with supersedes set to its id. Summary and sources are scanned for secrets and refused if found. Read it back with knowledge.lookup and knowledge.get, never .owox/ directly."
+        description = "Record research knowledge; scans for secrets."
     )]
     async fn knowledge_add(
         &self,
@@ -2175,7 +2228,7 @@ impl OwoxServer {
     /// 調査知識を一覧する。状態・鮮度で絞れる。
     #[tool(
         name = "knowledge.list",
-        description = "List research knowledge entries with id, title, research date, tags, status (current/superseded), and a stale flag (current entries past the freshness threshold). Optionally filter by status or to stale only. Use knowledge.get to read one in full."
+        description = "List knowledge entries with status and stale flag."
     )]
     async fn knowledge_list(
         &self,
@@ -2196,7 +2249,7 @@ impl OwoxServer {
     /// 調査知識を 1 件全文で読む。canon を直読みせずここから取る。
     #[tool(
         name = "knowledge.get",
-        description = "Get one research knowledge entry in full: summary, sources, research date, tags, status, and what it supersedes. Use instead of reading .owox/ directly."
+        description = "Get one research knowledge entry."
     )]
     async fn knowledge_get(
         &self,
@@ -2208,7 +2261,7 @@ impl OwoxServer {
     /// 調査知識を語で引く。title / summary / tags に部分一致するものを返す。
     #[tool(
         name = "knowledge.lookup",
-        description = "Search recorded research knowledge for a keyword (matched against title, summary, and tags) and get the matching entries' summaries. Use on demand before re-investigating something, instead of reading .owox/ directly."
+        description = "Search research knowledge summaries."
     )]
     async fn knowledge_lookup(
         &self,
@@ -2223,12 +2276,15 @@ impl OwoxServer {
     /// backstop として AI が能動的に引ける (glossary.lookup と対称)。封筒でなく描画本文を返す。
     #[tool(
         name = "rules.lookup",
-        description = "Get the project's rules and safety policy instead of reading .owox/ directly."
+        description = "Get current common and active-phase rules."
     )]
     async fn rules_lookup(&self) -> Result<CallToolResult, McpError> {
         let canon = owox_core::load_canon(&self.owox_dir)
             .map_err(|err| McpError::internal_error(format!("正本を読めない: {err}"), None))?;
-        Ok(self.text_result(owox_core::render_rules_block(&canon.rules)))
+        Ok(self.text_result(owox_core::render_rules_block_for_phase(
+            &canon.rules,
+            canon.state.phase,
+        )))
     }
 }
 
@@ -2252,9 +2308,13 @@ fn attach_delivery_guidance(
     ops: &[owox_core::DeliveryOperation],
     paths: &[String],
 ) {
-    let selection = owox_core::select_delivery(
+    let phase = owox_core::load_canon(owox_dir)
+        .map(|canon| canon.state.phase)
+        .unwrap_or(owox_core::Phase::Initial);
+    let selection = owox_core::select_delivery_for_phase(
         owox_dir,
         owox_core::DeliveryRequest::for_operations(ops, paths),
+        phase,
     )
     .unwrap_or_default();
     if selection.rules.is_empty() && selection.practices.is_empty() {
@@ -2463,6 +2523,56 @@ struct DiffContextData {
     gardening_hints: Vec<String>,
     needs_codebase: bool,
     guidance: owox_core::DeliverySelection,
+    glossary_suggestions: Vec<owox_core::GlossarySuggestion>,
+}
+
+fn build_glossary_suggestions(
+    repo_root: &Path,
+    owox_dir: &Path,
+    changed_paths: &[String],
+    include_session: bool,
+) -> Vec<owox_core::GlossarySuggestion> {
+    let texts: Vec<_> = changed_paths
+        .iter()
+        .filter(|path| crate::files::classify_path(path) != crate::files::FileKind::Canon)
+        .filter_map(|path| {
+            std::fs::read_to_string(repo_root.join(path))
+                .ok()
+                .map(|text| owox_core::GlossaryScanText {
+                    path: path.clone(),
+                    text,
+                })
+        })
+        .collect();
+    let mut hits = owox_core::extract_term_hits(&texts, "changed file");
+    if include_session {
+        hits.extend(crate::cache::read_current_glossary_hits(owox_dir));
+    }
+    owox_core::suggest_terms_from_hits(owox_dir, &hits)
+}
+
+fn render_glossary_suggestions(suggestions: &[owox_core::GlossarySuggestion]) -> String {
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "## Glossary candidates
+
+",
+    );
+    out.push_str("These are possible project terms. Review them before adding definitions.\n\n");
+    for suggestion in suggestions {
+        out.push_str(&format!(
+            "- {}: {}
+",
+            suggestion.term, suggestion.reason
+        ));
+        for example in &suggestion.examples {
+            out.push_str(&format!("  - {example}\n"));
+        }
+    }
+    out.push('\n');
+    out
 }
 
 fn render_diff_context(
@@ -2490,9 +2600,16 @@ fn build_diff_context(repo_root: &Path, owox_dir: &Path) -> Result<DiffContextDa
         scan_references(repo_root, &changed_files, &requirements, &decisions).summary;
     let needs_codebase = needs_codebase_map(&changed_files);
     let changed_paths: Vec<String> = changed_files.iter().map(|f| f.path.clone()).collect();
-    let guidance = owox_core::select_delivery(
+    let glossary_suggestions =
+        build_glossary_suggestions(repo_root, owox_dir, &changed_paths, false);
+    let canon = owox_core::load_canon(owox_dir).ok();
+    let guidance = owox_core::select_delivery_for_phase(
         owox_dir,
         owox_core::DeliveryRequest::for_paths(&changed_paths),
+        canon
+            .as_ref()
+            .map(|canon| canon.state.phase)
+            .unwrap_or(owox_core::Phase::Initial),
     )
     .unwrap_or_default();
     let review_hints = diff_review_hints(
@@ -2501,7 +2618,8 @@ fn build_diff_context(repo_root: &Path, owox_dir: &Path) -> Result<DiffContextDa
         &reference_summary,
         needs_codebase,
     );
-    let gardening_hints = owox_core::load_canon(owox_dir)
+    let gardening_hints = canon
+        .as_ref()
         .map(|canon| {
             let refs = scan_references(repo_root, &changed_files, &requirements, &decisions);
             build_gardening_findings(owox_dir, repo_root, &canon, &[], Some(&refs), false)
@@ -2522,6 +2640,7 @@ fn build_diff_context(repo_root: &Path, owox_dir: &Path) -> Result<DiffContextDa
         gardening_hints,
         needs_codebase,
         guidance,
+        glossary_suggestions,
     })
 }
 
@@ -2580,6 +2699,10 @@ fn render_diff_context_body(data: &DiffContextData, mission: crate::cache::Missi
             out.push_str(&format!("- {hint}\n"));
         }
         out.push('\n');
+    }
+
+    if !data.glossary_suggestions.is_empty() {
+        out.push_str(&render_glossary_suggestions(&data.glossary_suggestions));
     }
 
     let guidance = owox_core::render_delivery_block(&data.guidance);
@@ -2681,10 +2804,25 @@ fn diff_review_hints(
     hints
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ReferenceTarget {
     Requirement { id: String, criterion: Option<u32> },
     Decision { id: String },
+}
+
+#[derive(Debug, Clone)]
+struct ReferenceUse {
+    path: String,
+    kind: crate::files::FileKind,
+}
+
+struct ReferenceLookupData {
+    query: String,
+    target: ReferenceTarget,
+    exists: bool,
+    summary_lines: Vec<String>,
+    used_by: Vec<ReferenceUse>,
+    candidates: Vec<String>,
 }
 
 fn scan_references(
@@ -2749,6 +2887,172 @@ fn scan_references(
     ReferenceScan { summary, broken }
 }
 
+fn render_reference_context(
+    repo_root: &Path,
+    owox_dir: &Path,
+    reference_id: &str,
+    mission: crate::cache::Mission,
+) -> Result<String, McpError> {
+    let requirements = list_requirements(owox_dir)
+        .map_err(|err| McpError::internal_error(format!("要件を読めない: {err}"), None))?;
+    let decisions = list_decisions(owox_dir)
+        .map_err(|err| McpError::internal_error(format!("来歴を読めない: {err}"), None))?;
+    let data = build_reference_lookup_data(repo_root, reference_id, &requirements, &decisions)
+        .ok_or_else(|| McpError::internal_error("参照IDを解釈できない".to_string(), None))?;
+    Ok(render_reference_context_body(&data, mission))
+}
+
+fn build_reference_lookup_data(
+    repo_root: &Path,
+    reference_id: &str,
+    requirements: &[owox_core::Requirement],
+    decisions: &[owox_core::Decision],
+) -> Option<ReferenceLookupData> {
+    let target = parse_reference_query(reference_id)?;
+    let mut exists = false;
+    let mut summary_lines = Vec::new();
+    let mut candidates = Vec::new();
+    match &target {
+        ReferenceTarget::Requirement { id, criterion } => {
+            if let Some(requirement) = requirements
+                .iter()
+                .find(|requirement| requirement.id == *id)
+            {
+                exists = true;
+                summary_lines.push(format!("requirement: {}", requirement.id));
+                summary_lines.push(format!("title: {}", requirement.title));
+                summary_lines.push(format!(
+                    "status: {}",
+                    requirement_status_label(requirement.status)
+                ));
+                if let Some(criterion_id) = criterion {
+                    if let Some(found) = requirement
+                        .criteria
+                        .iter()
+                        .find(|criterion| criterion.id == *criterion_id)
+                    {
+                        summary_lines.push(format!("criterion: #{}", found.id));
+                        if !found.title.trim().is_empty() {
+                            summary_lines.push(format!("criterion title: {}", found.title));
+                        }
+                        if !found.then.trim().is_empty() {
+                            summary_lines.push(format!("criterion then: {}", found.then));
+                        }
+                    } else {
+                        exists = false;
+                        summary_lines.push(format!("missing criterion: #{}", criterion_id));
+                        candidates.extend(requirement.criteria.iter().map(|criterion| {
+                            format!("owox:req:{}#{}", requirement.id, criterion.id)
+                        }));
+                    }
+                } else {
+                    summary_lines.push(format!("criteria: {}", requirement.criteria.len()));
+                }
+            } else {
+                candidates.extend(similar_requirement_refs(id, requirements));
+            }
+        }
+        ReferenceTarget::Decision { id } => {
+            if let Some(decision) = decisions.iter().find(|decision| decision.id == *id) {
+                exists = true;
+                summary_lines.push(format!("decision: {}", decision.id));
+                summary_lines.push(format!("title: {}", decision.title));
+                summary_lines.push(format!(
+                    "status: {}",
+                    decision_status_label(decision.status)
+                ));
+            } else {
+                candidates.extend(similar_decision_refs(id, decisions));
+            }
+        }
+    }
+    let used_by = collect_reference_uses(repo_root, &target);
+    Some(ReferenceLookupData {
+        query: reference_id.trim().to_string(),
+        target,
+        exists,
+        summary_lines,
+        used_by,
+        candidates,
+    })
+}
+
+fn render_reference_context_body(
+    data: &ReferenceLookupData,
+    mission: crate::cache::Mission,
+) -> String {
+    let mut out = String::from("# Reference context\n\n");
+    match mission {
+        crate::cache::Mission::Kickoff => out.push_str(
+            "Kickoff mission is active. Use this to confirm trace before writing canon.\n\n",
+        ),
+        crate::cache::Mission::Review => {
+            out.push_str("Review mission is active. Use this to trace why the change exists.\n\n")
+        }
+        crate::cache::Mission::Verify => {
+            out.push_str("Verify mission is active. Use this to confirm trace coverage.\n\n")
+        }
+        crate::cache::Mission::Handoff => out.push_str(
+            "Handoff mission is active. Use this to point the next session at the right source.\n\n",
+        ),
+        crate::cache::Mission::Work => {}
+    }
+    out.push_str(&format!("Reference: {}\n\n", data.query));
+    out.push_str("## Status\n\n");
+    if data.exists {
+        out.push_str("- target exists\n");
+    } else {
+        out.push_str("- target missing\n");
+    }
+    out.push_str(&format!("- usages: {}\n\n", data.used_by.len()));
+
+    out.push_str("## Target\n\n");
+    if data.summary_lines.is_empty() {
+        out.push_str("- no matching requirement or decision found\n\n");
+    } else {
+        for line in &data.summary_lines {
+            out.push_str(&format!("- {line}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Used by\n\n");
+    if data.used_by.is_empty() {
+        out.push_str("- no references found in repo text files\n\n");
+    } else {
+        for item in &data.used_by {
+            out.push_str(&format!("- {} [{}]\n", item.path, item.kind.as_str()));
+        }
+        out.push('\n');
+    }
+
+    if !data.candidates.is_empty() {
+        out.push_str("## Candidates\n\n");
+        for candidate in data.candidates.iter().take(8) {
+            out.push_str(&format!("- {candidate}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Next\n\n");
+    match &data.target {
+        ReferenceTarget::Requirement { id, .. } if data.exists => {
+            out.push_str(&format!(
+                "- Call requirement.get with id {} for the full requirement.\n",
+                id
+            ));
+        }
+        ReferenceTarget::Decision { .. } if data.exists => {
+            out.push_str("- Use this summary as the decision read path, then run verify.run if trace is still unclear.\n");
+        }
+        _ => {
+            out.push_str("- Fix the reference or choose one of the candidates above.\n");
+        }
+    }
+    out.push_str("- Run verify.run to see broken owox references in the current change.\n\n");
+    out
+}
+
 fn extract_references(text: &str) -> Vec<ReferenceTarget> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -2780,6 +3084,31 @@ fn extract_references(text: &str) -> Vec<ReferenceTarget> {
     out
 }
 
+fn parse_reference_query(text: &str) -> Option<ReferenceTarget> {
+    let trimmed = text.trim();
+    if let Some(next) = trimmed.strip_prefix("owox:req:") {
+        let token = take_reference_token(next);
+        if token.is_empty() {
+            return None;
+        }
+        let (id, criterion) = match token.split_once('#') {
+            Some((id, number)) => (id.to_string(), number.parse::<u32>().ok()),
+            None => (token.to_string(), None),
+        };
+        return Some(ReferenceTarget::Requirement { id, criterion });
+    }
+    if let Some(next) = trimmed.strip_prefix("owox:dec:") {
+        let token = take_reference_token(next);
+        if token.is_empty() {
+            return None;
+        }
+        return Some(ReferenceTarget::Decision {
+            id: token.to_string(),
+        });
+    }
+    None
+}
+
 fn take_reference_token(text: &str) -> &str {
     let end = text
         .char_indices()
@@ -2793,6 +3122,131 @@ fn take_reference_token(text: &str) -> &str {
         .map(|(i, _)| i)
         .unwrap_or(text.len());
     text[..end].trim_end_matches(['.', ':', '!', '?'])
+}
+
+fn collect_reference_uses(repo_root: &Path, target: &ReferenceTarget) -> Vec<ReferenceUse> {
+    let mut paths = crate::files::list_repo_files(repo_root);
+    paths.extend(reference_canon_files(repo_root));
+    paths.sort();
+    paths.dedup();
+    let mut uses = Vec::new();
+    for path in paths {
+        let kind = crate::files::classify_path(&path);
+        if kind == crate::files::FileKind::Generated {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(repo_root.join(&path)) else {
+            continue;
+        };
+        if extract_references(&text)
+            .iter()
+            .any(|found| reference_matches(target, found))
+        {
+            uses.push(ReferenceUse { path, kind });
+        }
+    }
+    uses
+}
+
+fn reference_canon_files(repo_root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for rel in [".owox/requirements", ".owox/decisions"] {
+        let dir = repo_root.join(rel);
+        if dir.exists() {
+            walk_reference_files(repo_root, &dir, &mut out);
+        }
+    }
+    out
+}
+
+fn walk_reference_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_reference_files(root, &path, out);
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        out.push(rel.to_string_lossy().replace('\\', "/"));
+    }
+}
+
+fn reference_matches(target: &ReferenceTarget, found: &ReferenceTarget) -> bool {
+    match (target, found) {
+        (
+            ReferenceTarget::Requirement {
+                id: left_id,
+                criterion: None,
+            },
+            ReferenceTarget::Requirement { id: right_id, .. },
+        ) => left_id == right_id,
+        (
+            ReferenceTarget::Requirement {
+                id: left_id,
+                criterion: Some(left_criterion),
+            },
+            ReferenceTarget::Requirement {
+                id: right_id,
+                criterion: Some(right_criterion),
+            },
+        ) => left_id == right_id && left_criterion == right_criterion,
+        (ReferenceTarget::Decision { id: left_id }, ReferenceTarget::Decision { id: right_id }) => {
+            left_id == right_id
+        }
+        _ => false,
+    }
+}
+
+fn similar_requirement_refs(id: &str, requirements: &[owox_core::Requirement]) -> Vec<String> {
+    similar_ids(
+        id,
+        requirements
+            .iter()
+            .map(|requirement| requirement.id.as_str()),
+    )
+    .into_iter()
+    .map(|candidate| format!("owox:req:{candidate}"))
+    .collect()
+}
+
+fn similar_decision_refs(id: &str, decisions: &[owox_core::Decision]) -> Vec<String> {
+    similar_ids(id, decisions.iter().map(|decision| decision.id.as_str()))
+        .into_iter()
+        .map(|candidate| format!("owox:dec:{candidate}"))
+        .collect()
+}
+
+fn similar_ids<'a>(query: &str, ids: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let lower = query.to_lowercase();
+    ids.filter(|candidate| {
+        let candidate_lower = candidate.to_lowercase();
+        candidate_lower.contains(&lower) || lower.contains(&candidate_lower)
+    })
+    .take(8)
+    .map(str::to_string)
+    .collect()
+}
+
+fn requirement_status_label(status: owox_core::RequirementStatus) -> &'static str {
+    match status {
+        owox_core::RequirementStatus::Draft => "draft",
+        owox_core::RequirementStatus::Accepted => "accepted",
+        owox_core::RequirementStatus::Superseded => "superseded",
+    }
+}
+
+fn decision_status_label(status: DecisionStatus) -> &'static str {
+    match status {
+        DecisionStatus::Open => "open",
+        DecisionStatus::Adopted => "adopted",
+        DecisionStatus::Rejected => "rejected",
+        DecisionStatus::Superseded => "superseded",
+    }
 }
 
 fn short_id(value: &str) -> &str {
@@ -3760,6 +4214,7 @@ fn mission_preview(
         &[],
         &[],
         &[],
+        &[],
         axes,
         AutoApproval {
             profile: false,
@@ -4161,6 +4616,7 @@ fn render_next(
     decay: &[DecayFinding],
     routines: &[owox_core::RoutineSuggestion],
     gardening: &[GardeningFinding],
+    glossary_suggestions: &[owox_core::GlossarySuggestion],
     axes: owox_core::Axes,
     auto: AutoApproval,
     mission: crate::cache::Mission,
@@ -4208,6 +4664,7 @@ fn render_next(
         && decay.is_empty()
         && routines.is_empty()
         && gardening.is_empty()
+        && glossary_suggestions.is_empty()
         && unprioritized.is_empty()
         && auto_pending.is_empty()
         && !auto.active()
@@ -4318,6 +4775,9 @@ fn render_next(
     }
     if !gardening.is_empty() {
         out.push_str(&render_gardening(gardening));
+    }
+    if !glossary_suggestions.is_empty() {
+        out.push_str(&render_glossary_suggestions(glossary_suggestions));
     }
     if !routines.is_empty() {
         out.push_str(&render_routines(routines));
@@ -4551,6 +5011,105 @@ mod tests {
     }
 
     #[test]
+    fn parse_reference_query_accepts_requirement_and_decision_forms() {
+        match parse_reference_query("owox:req:20260625-a#3").unwrap() {
+            ReferenceTarget::Requirement { id, criterion } => {
+                assert_eq!(id, "20260625-a");
+                assert_eq!(criterion, Some(3));
+            }
+            _ => panic!("requirement expected"),
+        }
+        match parse_reference_query("owox:dec:20260625-b").unwrap() {
+            ReferenceTarget::Decision { id } => assert_eq!(id, "20260625-b"),
+            _ => panic!("decision expected"),
+        }
+        assert!(parse_reference_query("bad").is_none());
+    }
+
+    #[test]
+    fn reference_lookup_lists_usage_files_and_missing_criterion_candidates() {
+        let repo = temp_git_repo("owox-reference-lookup");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "// owox:req:req-1\n").unwrap();
+        std::fs::write(repo.join("docs/trace.md"), "owox:req:req-1#2\n").unwrap();
+
+        let requirements = vec![owox_core::Requirement {
+            id: "req-1".to_string(),
+            title: "traceability".to_string(),
+            status: owox_core::RequirementStatus::Accepted,
+            statement: String::new(),
+            criteria: vec![
+                owox_core::AcceptanceCriterion {
+                    id: 1,
+                    title: String::new(),
+                    given: String::new(),
+                    when: String::new(),
+                    then: "first".to_string(),
+                    verify: None,
+                },
+                owox_core::AcceptanceCriterion {
+                    id: 2,
+                    title: String::new(),
+                    given: String::new(),
+                    when: String::new(),
+                    then: "second".to_string(),
+                    verify: None,
+                },
+            ],
+            links: owox_core::RequirementLinks::default(),
+            supersedes: Vec::new(),
+            priority: None,
+            layer: None,
+            stage: None,
+            kind: None,
+        }];
+        let decisions = vec![owox_core::Decision {
+            id: "dec-1".to_string(),
+            title: "trace decision".to_string(),
+            status: DecisionStatus::Open,
+            rationale: String::new(),
+            links: owox_core::DecisionLinks::default(),
+            supersedes: Vec::new(),
+            proposed_change: None,
+            authorizes: Vec::new(),
+            consumed: false,
+            approval: None,
+            auto_approved: false,
+            confirmed: false,
+        }];
+
+        let found = build_reference_lookup_data(&repo, "owox:req:req-1", &requirements, &decisions)
+            .expect("lookup parses");
+        assert!(found.exists);
+        assert_eq!(found.used_by.len(), 2);
+        assert!(found.used_by.iter().any(|item| item.path == "src/lib.rs"));
+        assert!(
+            found
+                .used_by
+                .iter()
+                .any(|item| item.path == "docs/trace.md")
+        );
+
+        let missing =
+            build_reference_lookup_data(&repo, "owox:req:req-1#9", &requirements, &decisions)
+                .expect("lookup parses");
+        assert!(!missing.exists);
+        assert!(
+            missing
+                .candidates
+                .iter()
+                .any(|item| item == "owox:req:req-1#1")
+        );
+        assert!(
+            missing
+                .candidates
+                .iter()
+                .any(|item| item == "owox:req:req-1#2")
+        );
+    }
+
+    #[test]
     fn detect_codebase_areas_uses_mechanical_roles() {
         let files = vec![
             "Cargo.toml".to_string(),
@@ -4624,6 +5183,7 @@ mod tests {
             gardening_hints: Vec::new(),
             needs_codebase: true,
             guidance: owox_core::DeliverySelection::default(),
+            glossary_suggestions: Vec::new(),
         };
         let out = render_diff_context_body(&data, crate::cache::Mission::Work);
         assert!(out.contains("scope codebase"));
@@ -4748,6 +5308,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -4762,6 +5323,7 @@ mod tests {
     fn next_announces_open_auto_window() {
         // session 窓 (auto_session=true) の文言。
         let out = render_next(
+            &[],
             &[],
             &[],
             &[],
@@ -4788,6 +5350,7 @@ mod tests {
             ..owox_core::Axes::default()
         };
         let out = render_next(
+            &[],
             &[],
             &[],
             &[],
@@ -4824,6 +5387,7 @@ mod tests {
         };
         let out = render_next(
             std::slice::from_ref(&d),
+            &[],
             &[],
             &[],
             &[],
@@ -4880,6 +5444,7 @@ mod tests {
         let decisions = vec![practice, plain];
         let out = render_next(
             &decisions,
+            &[],
             &[],
             &[],
             &[],
@@ -4946,6 +5511,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             phased,
             AutoApproval {
                 profile: false,
@@ -4962,6 +5528,7 @@ mod tests {
         let out = render_next(
             &[],
             &[task],
+            &[],
             &[],
             &[],
             &[],
@@ -4989,6 +5556,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             layered,
             AutoApproval {
                 profile: false,
@@ -5007,6 +5575,7 @@ mod tests {
             &[],
             &[],
             &reqs,
+            &[],
             &[],
             &[],
             &[],
@@ -5033,6 +5602,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             ideal,
             AutoApproval {
                 profile: false,
@@ -5051,6 +5621,7 @@ mod tests {
             &[],
             &[],
             &reqs,
+            &[],
             &[],
             &[],
             &[],
@@ -5078,6 +5649,7 @@ mod tests {
             &decay,
             &[],
             &[],
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -5102,6 +5674,7 @@ mod tests {
             &[],
             &[],
             &decay,
+            &[],
             &[],
             &[],
             owox_core::Axes::default(),
@@ -5131,6 +5704,7 @@ mod tests {
             &[],
             &routines,
             &[],
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -5158,6 +5732,7 @@ mod tests {
             &[],
             &[],
             &gardening,
+            &[],
             owox_core::Axes::default(),
             AutoApproval {
                 profile: false,
@@ -5359,6 +5934,7 @@ mod tests {
     #[test]
     fn next_mentions_kickoff_mission() {
         let out = render_next(
+            &[],
             &[],
             &[],
             &[],

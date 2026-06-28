@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod experience;
 pub mod gate;
 pub mod glossary;
+pub mod glossary_suggestions;
 pub mod hook;
 pub mod irreversible;
 pub mod knowledge;
@@ -56,16 +57,22 @@ pub use decay::{
 };
 pub use delivery::{
     DeliveryOperation, DeliveryRequest, DeliverySelection, render_delivery_block, select_delivery,
+    select_delivery_for_phase,
 };
 pub use envelope::{Envelope, Gate, Status};
 pub use experience::{export as experience_export, import as experience_import};
 pub use gate::{Enforcement, autonomy_enforcement, commit_blocks, compose, phase_enforcement};
 pub use glossary::lookup as glossary_lookup;
+pub use glossary_suggestions::{
+    GlossaryScanText, GlossarySuggestion, GlossaryTermHit, extract_term_hits, suggest_terms,
+    suggest_terms_from_hits,
+};
 pub use hook::{
     GateAuthorization, GlossaryInjection, HookDecision, LayerGate, PatchChange, PatchOp,
     PolicyInjection, StopDecision, VerifyOutcome, commit_gate, floor_context, glossary_injection,
     is_git_commit, layer_pre_action_gate, parse_patch_changes, policy_injection,
-    pre_tool_use_decision, render_rules_block, render_skills_section, stop_decision, write_targets,
+    pre_tool_use_decision, render_rules_block, render_rules_block_for_phase, render_skills_section,
+    stop_decision, write_targets,
 };
 pub use knowledge::{
     Knowledge, KnowledgeInput, KnowledgeStatus, add_knowledge, get_knowledge, list_knowledge,

@@ -187,6 +187,56 @@ pub fn set_current_mission(owox_dir: &Path, mission: Mission) -> Result<(), Stri
     write_mission_map(owox_dir, &map)
 }
 
+fn glossary_hits_path(owox_dir: &Path, session_id: &str) -> PathBuf {
+    dir(owox_dir)
+        .join("glossary-hits")
+        .join(format!("{session_id}.json"))
+}
+
+fn read_glossary_hits_for_session(
+    owox_dir: &Path,
+    session_id: &str,
+) -> Vec<owox_core::GlossaryTermHit> {
+    std::fs::read_to_string(glossary_hits_path(owox_dir, session_id))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<owox_core::GlossaryTermHit>>(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn read_current_glossary_hits(owox_dir: &Path) -> Vec<owox_core::GlossaryTermHit> {
+    current_session_id(owox_dir)
+        .as_deref()
+        .map(|session_id| read_glossary_hits_for_session(owox_dir, session_id))
+        .unwrap_or_default()
+}
+
+pub fn remember_glossary_hits(
+    owox_dir: &Path,
+    session_id: Option<&str>,
+    hits: &[owox_core::GlossaryTermHit],
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    if hits.is_empty() {
+        return;
+    }
+    ensure_ignored(owox_dir);
+    let path = glossary_hits_path(owox_dir, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut all = read_glossary_hits_for_session(owox_dir, session_id);
+    all.extend(hits.iter().cloned());
+    if all.len() > 512 {
+        let keep_from = all.len() - 512;
+        all = all.split_off(keep_from);
+    }
+    if let Ok(json) = serde_json::to_string(&all) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
 /// コードベース索引の area 1 件。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CodebaseArea {
@@ -393,5 +443,34 @@ mod tests {
         };
         write_codebase_index(&owox, &index).unwrap();
         assert_eq!(read_codebase_index(&owox), Some(index));
+    }
+
+    #[test]
+    fn glossary_hits_are_session_scoped() {
+        let owox = tempdir();
+        remember_glossary_hits(
+            &owox,
+            Some("session-a"),
+            &[owox_core::GlossaryTermHit {
+                term: "TargetHarness".to_string(),
+                source: "user prompt".to_string(),
+                example: "user prompt".to_string(),
+            }],
+        );
+        remember_glossary_hits(
+            &owox,
+            Some("session-b"),
+            &[owox_core::GlossaryTermHit {
+                term: "OtherTerm".to_string(),
+                source: "lookup miss".to_string(),
+                example: "OtherTerm".to_string(),
+            }],
+        );
+        let a = read_glossary_hits_for_session(&owox, "session-a");
+        let b = read_glossary_hits_for_session(&owox, "session-b");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].term, "TargetHarness");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].term, "OtherTerm");
     }
 }

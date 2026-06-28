@@ -38,18 +38,18 @@
 
 ## 仕様
 
-### 起動
+### 切替
 
 `kickoff` は完全手動。
 `$kickoff` が `mission.start type="kickoff"` を呼ぶ。
 
-`SessionStart` や発話検知では開始しない。
+`SessionStart` や発話検知では切替しない。
 
 `mission.start` の返却:
 
 - `mission`
 - `next_preview`
-- kickoff 開始時だけ `data.kickoff`
+- kickoff 切替時だけ `data.kickoff`
   - `unresolved`
   - `ai_drafts`
   - `human_decisions`
@@ -60,6 +60,7 @@
 ### session 任務
 
 session は任務種別を 1 つ持てる。
+未切替時も `work` を持つ。
 
 初期候補:
 
@@ -77,7 +78,7 @@ mission: kickoff
 
 隠れ状態にしない。
 
-### 終了
+### 通常作業へ戻る
 
 `mission.start type="work"` で通常作業へ戻る。
 
@@ -253,6 +254,7 @@ kickoff 中は原則書かない。
 
 - `owox.kickoff` 専用 tool ではなく `mission.start` を使う
 - `$kickoff` skill は `mission.start type="kickoff"` と `next` を呼ぶ入口にする
+- 任務は常に 1 つあり、既定は `work`
 - 各 tool は session 任務を読んで返却内容を変える
 - 任務種別は少数に抑える
 

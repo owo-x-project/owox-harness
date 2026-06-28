@@ -38,4 +38,5 @@
 - `20260625-memo-伝言メモ不要.md`: 草案。伝言メモ専用 tool や新ストアは作らず、判断は `decision.record`、作業メモは `task.note` / `branch.note`、調査結果は `knowledge.add`、skill 改善は `skill.remember`、引き継ぎは `$handoff` へ分類する方針
 - `20260625-rules-practices読取タイミング.md`: 草案。ユーザー発話の語彙で intent を判定せず、`always` / `path` / `operation` の3 trigger で rules / practices を届ける方針。操作種類は tool 入力・path・差分から機械判定し、i18n は不要にする
 - `20260625-codebase-コードベース索引.md`: 草案。コードベース調査結果を永続記憶でなく索引 cache として扱い、`context scope="codebase"` で本文なしの repo 地図を返す方針。腐ったら再計算し、耐久事実は `knowledge.add`、判断は `decision.record` へ昇格する
-- `20260625-mission-kickoff.md`: 草案。`kickoff` を完全手動開始の session 任務種別として扱い、`mission.start type="kickoff"` 後は `next` / `context` / `verify.run` などが未確定事項の洗い出しと1論点ずつの判断詰めへ最適化される方針。全質問に AI の推奨案と理由を必ず添え、自動正本書込はしない
+- `20260625-mission-kickoff.md`: 草案。session 任務は常に 1 つあり既定は `work`、`kickoff` は `mission.start type="kickoff"` で手動切替する方針。切替後の `next` / `context` / `verify.run` などは未確定事項の洗い出しと1論点ずつの判断詰めへ最適化される。全質問に AI の推奨案と理由を必ず添え、自動正本書込はしない
+- `20260627-manifest-正本索引方針.md`: 草案。初期実装では専用 manifest を作らず、`context scope="codebase"` と codebase index cache を正本探索の入口にする方針

@@ -134,6 +134,13 @@ tool をカテゴリで扱う。
 4. `context scope="diff"` を足す
 5. mode 統合は後回し
 
+## tool description 基準
+
+- 1文だけ
+- 選択に必要な役割だけ書く
+- 安全条件がある tool だけ安全条件を書く
+- 例・細かい引数説明・後続導線は書かない
+
 ## 検証
 
 - `SessionStart` が個別 tool の詳細説明を持たない
@@ -144,7 +151,6 @@ tool をカテゴリで扱う。
 
 ## 未決事項
 
-- tool description の短縮基準
 - 自動承認系 tool の整理方法
 - profile / knowledge / branch を mode 統合する時期
 - 入口 skill 本文の最終文面

@@ -125,6 +125,18 @@ fn user_prompt_submit() -> ExitCode {
     if prompt.is_empty() {
         return ExitCode::SUCCESS;
     }
+    let prompt_hits = owox_core::extract_term_hits(
+        &[owox_core::GlossaryScanText {
+            path: "user prompt".to_string(),
+            text: prompt.to_string(),
+        }],
+        "user prompt",
+    );
+    crate::cache::remember_glossary_hits(
+        &owox_dir(input.cwd.as_deref()),
+        input.session_id.as_deref(),
+        &prompt_hits,
+    );
 
     let Some(canon) = load_canon_from(input.cwd.as_deref()) else {
         return ExitCode::SUCCESS;
@@ -295,17 +307,30 @@ fn pre_tool_use() -> ExitCode {
     if let Some(canon) = canon.as_ref() {
         let already = read_injected_terms(input.cwd.as_deref(), input.session_id.as_deref());
         let mut terms: Vec<String> = Vec::new();
-        if let Some(content) = glossary_scan_text(&input)
-            && let Some(inj) = owox_core::glossary_injection(canon, &content, &already)
-        {
-            push_block(&mut context, &inj.context);
-            terms.extend(inj.terms);
+        let scan_texts = glossary_scan_texts(&input);
+        if !scan_texts.is_empty() {
+            let hits = owox_core::extract_term_hits(&scan_texts, "read scan");
+            crate::cache::remember_glossary_hits(
+                &owox_dir(input.cwd.as_deref()),
+                input.session_id.as_deref(),
+                &hits,
+            );
+            let content = scan_texts
+                .iter()
+                .map(|text| text.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(inj) = owox_core::glossary_injection(canon, &content, &already) {
+                push_block(&mut context, &inj.context);
+                terms.extend(inj.terms);
+            }
         }
         let delivery_paths = pre_tool_use_delivery_paths(&input);
         let delivery_ops = pre_tool_use_delivery_operations(&input, &delivery_paths);
-        if let Ok(selection) = owox_core::select_delivery(
+        if let Ok(selection) = owox_core::select_delivery_for_phase(
             &owox_dir(input.cwd.as_deref()),
             owox_core::DeliveryRequest::for_operations(&delivery_ops, &delivery_paths),
+            canon.state.phase,
         ) {
             let block = owox_core::render_delivery_block(&selection);
             if !block.is_empty() {
@@ -636,9 +661,11 @@ fn session_start() -> ExitCode {
         .unwrap_or(crate::cache::Mission::Work);
     context.push_str(&format!("Current mission: {}.\n\n", mission.as_str()));
     context.push_str(&current_pressure_line(&owox, &canon));
-    if let Ok(selection) =
-        owox_core::select_delivery(&owox, owox_core::DeliveryRequest::session_start())
-    {
+    if let Ok(selection) = owox_core::select_delivery_for_phase(
+        &owox,
+        owox_core::DeliveryRequest::session_start(canon.state.phase),
+        canon.state.phase,
+    ) {
         let block = owox_core::render_delivery_block(&selection);
         if !block.is_empty() {
             context.push('\n');
@@ -909,19 +936,23 @@ fn ensure_cache_ignored(cwd: Option<&str>) {
 }
 
 /// 読取前に軽く走査する本文。repo 内の text file だけ、各 file 8KB まで。
-fn glossary_scan_text(input: &HookInput) -> Option<String> {
-    let work_dir = input.cwd.as_deref().map(PathBuf::from)?;
+fn glossary_scan_texts(input: &HookInput) -> Vec<owox_core::GlossaryScanText> {
+    let Some(work_dir) = input.cwd.as_deref().map(PathBuf::from) else {
+        return Vec::new();
+    };
     let paths = glossary_scan_targets(input, &work_dir);
-    if paths.is_empty() {
-        return None;
-    }
-    let mut blocks = Vec::new();
+    let mut texts = Vec::new();
     for path in paths {
         if let Some(text) = read_text_prefix(&path, 8 * 1024) {
-            blocks.push(text);
+            let rel = path
+                .strip_prefix(&work_dir)
+                .ok()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            texts.push(owox_core::GlossaryScanText { path: rel, text });
         }
     }
-    (!blocks.is_empty()).then(|| blocks.join("\n"))
+    texts
 }
 
 fn glossary_scan_targets(input: &HookInput, work_dir: &Path) -> Vec<PathBuf> {
